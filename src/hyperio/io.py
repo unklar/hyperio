@@ -28,6 +28,9 @@ from ._utils import (
 class ReadResult:
     cube: np.ndarray
     wavelengths: np.ndarray
+    reference_spectrum: np.ndarray | None = None
+    reference_multiplier: float = 1.0
+    reference_eps: float = 1e-8
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,49 @@ class Jp2Metadata:
     reference_spectrum: np.ndarray | None
     reference_multiplier: float
     reference_eps: float
+
+
+def _sidecar_json_path(image_path: pathlib.Path) -> pathlib.Path:
+    """Return the JSON sidecar path for a given image path.
+
+    For regular files (e.g. ``cube.hdr``) the sidecar is ``cube.json``.
+    For directories (PNG folder) the sidecar is ``<dir>/metadata.json``.
+    """
+    if image_path.is_dir() or not image_path.suffix:
+        return image_path / "metadata.json"
+    return image_path.with_suffix(".json")
+
+
+def _write_sidecar_json(
+    image_path: pathlib.Path,
+    wavelengths: np.ndarray,
+    reference_spectrum: np.ndarray | None = None,
+    reference_multiplier: float = 1.0,
+    reference_eps: float = 1e-8,
+) -> pathlib.Path:
+    """Write a JSON sidecar file with full HSI metadata."""
+    meta: dict[str, Any] = {
+        "wavelengths": wavelengths.astype(np.float64).tolist(),
+    }
+    if reference_spectrum is not None:
+        meta["reference_spectrum"] = reference_spectrum.astype(np.float64).tolist()
+    if reference_multiplier != 1.0:
+        meta["reference_multiplier"] = reference_multiplier
+    if reference_eps != 1e-8:
+        meta["reference_eps"] = reference_eps
+
+    json_path = _sidecar_json_path(image_path)
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(meta, indent=2))
+    return json_path
+
+
+def _read_sidecar_json(image_path: pathlib.Path) -> dict[str, Any] | None:
+    """Read a JSON sidecar file, returning None if it does not exist."""
+    json_path = _sidecar_json_path(image_path)
+    if not json_path.exists():
+        return None
+    return json.loads(json_path.read_text())
 
 
 def _extract_png_index(stem: str) -> int | None:
@@ -318,13 +364,33 @@ def read_envi(
     wavelengths: np.ndarray | list[float] | None = None,
     min_wavelength: float | None = None,
     max_wavelength: float | None = None,
+    metadata_json: bool = False,
 ) -> ReadResult:
+    p = pathlib.Path(path)
+    sidecar_wavelengths: np.ndarray | None = None
+    sidecar_ref: np.ndarray | None = None
+    sidecar_mult: float = 1.0
+    sidecar_eps: float = 1e-8
+    if metadata_json:
+        sc = _read_sidecar_json(p)
+        if sc is not None:
+            if "wavelengths" in sc:
+                sidecar_wavelengths = np.asarray(sc["wavelengths"], dtype=np.float32)
+            if "reference_spectrum" in sc:
+                sidecar_ref = np.asarray(sc["reference_spectrum"], dtype=np.float32)
+            if "reference_multiplier" in sc:
+                sidecar_mult = float(sc["reference_multiplier"])
+            if "reference_eps" in sc:
+                sidecar_eps = float(sc["reference_eps"])
+
     img = envi.open(str(path))
     cube = np.asarray(img.load())
     cube = normalize_to_hwc(cube)
     cube = to_float32_cube(cube)
 
     extracted = parse_envi_wavelengths(img.metadata.get("wavelength"))
+    if sidecar_wavelengths is not None:
+        extracted = sidecar_wavelengths
     wl = _resolve_wavelengths(
         cube,
         explicit_wavelengths=wavelengths,
@@ -333,7 +399,13 @@ def read_envi(
         extracted_wavelengths=extracted,
         format_name="ENVI",
     )
-    return ReadResult(cube=cube, wavelengths=wl)
+    return ReadResult(
+        cube=cube,
+        wavelengths=wl,
+        reference_spectrum=sidecar_ref,
+        reference_multiplier=sidecar_mult,
+        reference_eps=sidecar_eps,
+    )
 
 
 def read_tiff(
@@ -341,7 +413,25 @@ def read_tiff(
     wavelengths: np.ndarray | list[float] | None = None,
     min_wavelength: float | None = None,
     max_wavelength: float | None = None,
+    metadata_json: bool = False,
 ) -> ReadResult:
+    p = pathlib.Path(path)
+    sidecar_wavelengths: np.ndarray | None = None
+    sidecar_ref: np.ndarray | None = None
+    sidecar_mult: float = 1.0
+    sidecar_eps: float = 1e-8
+    if metadata_json:
+        sc = _read_sidecar_json(p)
+        if sc is not None:
+            if "wavelengths" in sc:
+                sidecar_wavelengths = np.asarray(sc["wavelengths"], dtype=np.float32)
+            if "reference_spectrum" in sc:
+                sidecar_ref = np.asarray(sc["reference_spectrum"], dtype=np.float32)
+            if "reference_multiplier" in sc:
+                sidecar_mult = float(sc["reference_multiplier"])
+            if "reference_eps" in sc:
+                sidecar_eps = float(sc["reference_eps"])
+
     with tifffile.TiffFile(path) as tif:
         arr = tif.asarray()
 
@@ -401,6 +491,8 @@ def read_tiff(
     cube = normalize_to_hwc(np.asarray(arr))
     cube = to_float32_cube(cube)
 
+    if sidecar_wavelengths is not None:
+        extracted = sidecar_wavelengths
     wl = _resolve_wavelengths(
         cube,
         explicit_wavelengths=wavelengths,
@@ -409,7 +501,13 @@ def read_tiff(
         extracted_wavelengths=extracted,
         format_name="TIFF",
     )
-    return ReadResult(cube=cube, wavelengths=wl)
+    return ReadResult(
+        cube=cube,
+        wavelengths=wl,
+        reference_spectrum=sidecar_ref,
+        reference_multiplier=sidecar_mult,
+        reference_eps=sidecar_eps,
+    )
 
 
 def read_jp2(
@@ -418,7 +516,25 @@ def read_jp2(
     min_wavelength: float | None = None,
     max_wavelength: float | None = None,
     normalize: bool = True,
+    metadata_json: bool = False,
 ) -> ReadResult:
+    p = pathlib.Path(path)
+    sidecar_wavelengths: np.ndarray | None = None
+    sidecar_ref: np.ndarray | None = None
+    sidecar_mult: float = 1.0
+    sidecar_eps: float = 1e-8
+    if metadata_json:
+        sc = _read_sidecar_json(p)
+        if sc is not None:
+            if "wavelengths" in sc:
+                sidecar_wavelengths = np.asarray(sc["wavelengths"], dtype=np.float32)
+            if "reference_spectrum" in sc:
+                sidecar_ref = np.asarray(sc["reference_spectrum"], dtype=np.float32)
+            if "reference_multiplier" in sc:
+                sidecar_mult = float(sc["reference_multiplier"])
+            if "reference_eps" in sc:
+                sidecar_eps = float(sc["reference_eps"])
+
     with rasterio.open(path) as src:
         arr = src.read()
 
@@ -432,6 +548,8 @@ def read_jp2(
     cube = to_float32_cube(cube)
 
     extracted = md.wavelengths
+    if sidecar_wavelengths is not None:
+        extracted = sidecar_wavelengths
     if extracted is None:
         try:
             with rasterio.open(path) as src:
@@ -444,7 +562,7 @@ def read_jp2(
     if extracted is not None:
         extracted = _align_wavelength_count(extracted, int(cube.shape[2]))
 
-    if normalize and md.reference_spectrum is not None:
+    if normalize and md.reference_spectrum is not None and sidecar_ref is None:
         ref = _align_wavelength_count(md.reference_spectrum, int(cube.shape[2]))
         if ref.size != cube.shape[2]:
             raise ValueError(
@@ -457,6 +575,15 @@ def read_jp2(
             reference_multiplier=md.reference_multiplier,
             reference_eps=md.reference_eps,
         )
+    elif normalize and sidecar_ref is not None:
+        ref = _align_wavelength_count(sidecar_ref, int(cube.shape[2]))
+        ref = _canonicalize_reference_for_unit_cube(ref, cube)
+        cube = _normalize_cube_with_reference(
+            cube,
+            reference_spectrum=ref,
+            reference_multiplier=sidecar_mult,
+            reference_eps=sidecar_eps,
+        )
 
     wl = _resolve_wavelengths(
         cube,
@@ -466,7 +593,13 @@ def read_jp2(
         extracted_wavelengths=extracted,
         format_name="JP2",
     )
-    return ReadResult(cube=cube, wavelengths=wl)
+    return ReadResult(
+        cube=cube,
+        wavelengths=wl,
+        reference_spectrum=sidecar_ref if sidecar_ref is not None else md.reference_spectrum,
+        reference_multiplier=sidecar_mult if sidecar_ref is not None else md.reference_multiplier,
+        reference_eps=sidecar_eps if sidecar_ref is not None else md.reference_eps,
+    )
 
 
 def read_hsd(
@@ -474,6 +607,7 @@ def read_hsd(
     wavelengths: np.ndarray | list[float] | None = None,
     min_wavelength: float | None = None,
     max_wavelength: float | None = None,
+    metadata_json: bool = False,
 ) -> ReadResult:
     """Read HSICityV2 HSD files and reconstruct the hyperspectral cube.
 
@@ -481,6 +615,22 @@ def read_hsd(
     ``write_hsd``, where the full float32 cube is stored verbatim
     after the header.
     """
+    p = pathlib.Path(path)
+    sidecar_wavelengths: np.ndarray | None = None
+    sidecar_ref: np.ndarray | None = None
+    sidecar_mult: float = 1.0
+    sidecar_eps: float = 1e-8
+    if metadata_json:
+        sc = _read_sidecar_json(p)
+        if sc is not None:
+            if "wavelengths" in sc:
+                sidecar_wavelengths = np.asarray(sc["wavelengths"], dtype=np.float32)
+            if "reference_spectrum" in sc:
+                sidecar_ref = np.asarray(sc["reference_spectrum"], dtype=np.float32)
+            if "reference_multiplier" in sc:
+                sidecar_mult = float(sc["reference_multiplier"])
+            if "reference_eps" in sc:
+                sidecar_eps = float(sc["reference_eps"])
     header = np.fromfile(path, dtype=np.int32, count=7)
     if header.size != 7:
         raise ValueError("Invalid HSD file: could not read 7 int32 header values")
@@ -541,6 +691,8 @@ def read_hsd(
         cube = to_float32_cube(cube)
 
     extracted = np.linspace(startw, endw, sr, dtype=np.float32)
+    if sidecar_wavelengths is not None:
+        extracted = sidecar_wavelengths
     wl = _resolve_wavelengths(
         cube,
         explicit_wavelengths=wavelengths,
@@ -550,7 +702,13 @@ def read_hsd(
         format_name="HSD",
     )
 
-    return ReadResult(cube=cube, wavelengths=wl)
+    return ReadResult(
+        cube=cube,
+        wavelengths=wl,
+        reference_spectrum=sidecar_ref,
+        reference_multiplier=sidecar_mult,
+        reference_eps=sidecar_eps,
+    )
 
 
 def read_line_scan_png_folder(
@@ -559,6 +717,7 @@ def read_line_scan_png_folder(
     min_wavelength: float | None = None,
     max_wavelength: float | None = None,
     line_cam: bool = True,
+    metadata_json: bool = False,
 ) -> ReadResult:
     """Read a folder of PNG files into a hyperspectral cube.
 
@@ -572,6 +731,22 @@ def read_line_scan_png_folder(
     p = pathlib.Path(folder)
     if not p.is_dir():
         raise ValueError(f"Path is not a directory: {p}")
+
+    sidecar_wavelengths: np.ndarray | None = None
+    sidecar_ref: np.ndarray | None = None
+    sidecar_mult: float = 1.0
+    sidecar_eps: float = 1e-8
+    if metadata_json:
+        sc = _read_sidecar_json(p)
+        if sc is not None:
+            if "wavelengths" in sc:
+                sidecar_wavelengths = np.asarray(sc["wavelengths"], dtype=np.float32)
+            if "reference_spectrum" in sc:
+                sidecar_ref = np.asarray(sc["reference_spectrum"], dtype=np.float32)
+            if "reference_multiplier" in sc:
+                sidecar_mult = float(sc["reference_multiplier"])
+            if "reference_eps" in sc:
+                sidecar_eps = float(sc["reference_eps"])
 
     numbered_pngs: list[tuple[int, pathlib.Path]] = []
     for file_path in p.iterdir():
@@ -657,15 +832,24 @@ def read_line_scan_png_folder(
 
     cube = to_float32_cube(cube)
 
+    extracted_wl: np.ndarray | None = None
+    if sidecar_wavelengths is not None:
+        extracted_wl = sidecar_wavelengths
     wl = _resolve_wavelengths(
         cube,
         explicit_wavelengths=wavelengths,
         min_wavelength=min_wavelength,
         max_wavelength=max_wavelength,
-        extracted_wavelengths=None,
+        extracted_wavelengths=extracted_wl,
         format_name="Line-scan PNG folder",
     )
-    return ReadResult(cube=cube, wavelengths=wl)
+    return ReadResult(
+        cube=cube,
+        wavelengths=wl,
+        reference_spectrum=sidecar_ref,
+        reference_multiplier=sidecar_mult,
+        reference_eps=sidecar_eps,
+    )
 
 
 def read_auto(
@@ -675,6 +859,7 @@ def read_auto(
     max_wavelength: float | None = None,
     line_cam: bool = True,
     normalize: bool = True,
+    metadata_json: bool = False,
 ) -> ReadResult:
     p = pathlib.Path(path)
     if p.is_dir():
@@ -684,6 +869,7 @@ def read_auto(
             min_wavelength=min_wavelength,
             max_wavelength=max_wavelength,
             line_cam=line_cam,
+            metadata_json=metadata_json,
         )
 
     ext = p.suffix.lower()
@@ -694,6 +880,7 @@ def read_auto(
             wavelengths=wavelengths,
             min_wavelength=min_wavelength,
             max_wavelength=max_wavelength,
+            metadata_json=metadata_json,
         )
     if ext in {".tif", ".tiff"}:
         return read_tiff(
@@ -701,6 +888,7 @@ def read_auto(
             wavelengths=wavelengths,
             min_wavelength=min_wavelength,
             max_wavelength=max_wavelength,
+            metadata_json=metadata_json,
         )
     if ext == ".jp2":
         return read_jp2(
@@ -709,6 +897,7 @@ def read_auto(
             min_wavelength=min_wavelength,
             max_wavelength=max_wavelength,
             normalize=normalize,
+            metadata_json=metadata_json,
         )
     if ext == ".hsd":
         return read_hsd(
@@ -716,6 +905,7 @@ def read_auto(
             wavelengths=wavelengths,
             min_wavelength=min_wavelength,
             max_wavelength=max_wavelength,
+            metadata_json=metadata_json,
         )
 
     raise ValueError(f"Unsupported file extension: {ext}")
@@ -725,6 +915,10 @@ def write_envi(
     cube: np.ndarray,
     wavelengths: np.ndarray,
     path: str | pathlib.Path,
+    metadata_json: bool = False,
+    reference_spectrum: np.ndarray | None = None,
+    reference_multiplier: float = 1.0,
+    reference_eps: float = 1e-8,
 ) -> pathlib.Path:
     """Write an HSI cube to ENVI format (raw binary + .hdr header).
 
@@ -750,6 +944,16 @@ def write_envi(
     }
 
     envi.save_image(str(hdr_path), cube, metadata=meta, interleave="bsq")
+
+    if metadata_json:
+        _write_sidecar_json(
+            hdr_path,
+            wavelengths,
+            reference_spectrum=reference_spectrum,
+            reference_multiplier=reference_multiplier,
+            reference_eps=reference_eps,
+        )
+
     return hdr_path
 
 
@@ -757,6 +961,10 @@ def write_tiff(
     cube: np.ndarray,
     wavelengths: np.ndarray,
     path: str | pathlib.Path,
+    metadata_json: bool = False,
+    reference_spectrum: np.ndarray | None = None,
+    reference_multiplier: float = 1.0,
+    reference_eps: float = 1e-8,
 ) -> pathlib.Path:
     """Write an HSI cube to TIFF with wavelength metadata embedded.
 
@@ -770,6 +978,16 @@ def write_tiff(
 
     metadata = {"wavelengths": wavelengths.astype(np.float64).tolist()}
     tifffile.imwrite(str(p), cube, metadata=metadata)
+
+    if metadata_json:
+        _write_sidecar_json(
+            p,
+            wavelengths,
+            reference_spectrum=reference_spectrum,
+            reference_multiplier=reference_multiplier,
+            reference_eps=reference_eps,
+        )
+
     return p
 
 
@@ -777,6 +995,10 @@ def write_jp2(
     cube: np.ndarray,
     wavelengths: np.ndarray,
     path: str | pathlib.Path,
+    metadata_json: bool = False,
+    reference_spectrum: np.ndarray | None = None,
+    reference_multiplier: float = 1.0,
+    reference_eps: float = 1e-8,
 ) -> pathlib.Path:
     """Write an HSI cube to JPEG 2000.
 
@@ -811,6 +1033,15 @@ def write_jp2(
         wl_json = json.dumps(wavelengths.tolist())
         dst.update_tags(1, wavelength=wl_json)
 
+    if metadata_json:
+        _write_sidecar_json(
+            p,
+            wavelengths,
+            reference_spectrum=reference_spectrum,
+            reference_multiplier=reference_multiplier,
+            reference_eps=reference_eps,
+        )
+
     return p
 
 
@@ -818,6 +1049,10 @@ def write_hsd(
     cube: np.ndarray,
     wavelengths: np.ndarray,
     path: str | pathlib.Path,
+    metadata_json: bool = False,
+    reference_spectrum: np.ndarray | None = None,
+    reference_multiplier: float = 1.0,
+    reference_eps: float = 1e-8,
 ) -> pathlib.Path:
     """Write an HSI cube to HSICityV2-compatible HSD format.
 
@@ -852,6 +1087,15 @@ def write_hsd(
         average.tofile(f)
         cube.reshape(-1).astype(np.float32).tofile(f)
 
+    if metadata_json:
+        _write_sidecar_json(
+            p,
+            wavelengths,
+            reference_spectrum=reference_spectrum,
+            reference_multiplier=reference_multiplier,
+            reference_eps=reference_eps,
+        )
+
     return p
 
 
@@ -860,6 +1104,10 @@ def write_png_folder(
     wavelengths: np.ndarray,
     folder: str | pathlib.Path,
     line_cam: bool = True,
+    metadata_json: bool = False,
+    reference_spectrum: np.ndarray | None = None,
+    reference_multiplier: float = 1.0,
+    reference_eps: float = 1e-8,
 ) -> pathlib.Path:
     """Write an HSI cube as a folder of indexed PNG files.
 
@@ -887,6 +1135,15 @@ def write_png_folder(
             img = Image.fromarray(channel_uint16)
             img.save(p / f"{i:05d}.png")
 
+    if metadata_json:
+        _write_sidecar_json(
+            p,
+            wavelengths,
+            reference_spectrum=reference_spectrum,
+            reference_multiplier=reference_multiplier,
+            reference_eps=reference_eps,
+        )
+
     return p
 
 
@@ -894,6 +1151,11 @@ def write_auto(
     cube: np.ndarray,
     wavelengths: np.ndarray,
     path: str | pathlib.Path,
+    metadata_json: bool = False,
+    reference_spectrum: np.ndarray | None = None,
+    reference_multiplier: float = 1.0,
+    reference_eps: float = 1e-8,
+    line_cam: bool = True,
 ) -> pathlib.Path:
     """Dispatch to the appropriate writer based on file extension or path type.
 
@@ -903,18 +1165,32 @@ def write_auto(
     p = pathlib.Path(path)
 
     if p.is_dir() or (not p.suffix):
-        return write_png_folder(cube, wavelengths, p)
+        return write_png_folder(
+            cube, wavelengths, p,
+            line_cam=line_cam,
+            metadata_json=metadata_json,
+            reference_spectrum=reference_spectrum,
+            reference_multiplier=reference_multiplier,
+            reference_eps=reference_eps,
+        )
 
     ext = p.suffix.lower()
 
+    kw = dict(
+        metadata_json=metadata_json,
+        reference_spectrum=reference_spectrum,
+        reference_multiplier=reference_multiplier,
+        reference_eps=reference_eps,
+    )
+
     if ext == ".hdr":
-        return write_envi(cube, wavelengths, p)
+        return write_envi(cube, wavelengths, p, **kw)
     if ext in {".tif", ".tiff"}:
-        return write_tiff(cube, wavelengths, p)
+        return write_tiff(cube, wavelengths, p, **kw)
     if ext == ".jp2":
-        return write_jp2(cube, wavelengths, p)
+        return write_jp2(cube, wavelengths, p, **kw)
     if ext == ".hsd":
-        return write_hsd(cube, wavelengths, p)
+        return write_hsd(cube, wavelengths, p, **kw)
 
     raise ValueError(
         f"Unsupported file extension for writing: {ext}. "

@@ -54,6 +54,27 @@ the file extension:
    hsi.write("output_folder/")          # line_cam=True (default)
    hsi.write("output_folder/", line_cam=False)  # channel-stack mode
 
+JSON sidecar metadata
+^^^^^^^^^^^^^^^^^^^^^
+
+Pass ``metadata_json=True`` to write or read a JSON sidecar file
+alongside the image.  The sidecar stores the full wavelength vector
+and optional reference spectrum, enabling **exact wavelength
+round-trips** even for formats that normally lose precision (HSD, PNG
+folder):
+
+.. code-block:: python
+
+   # Write with a JSON sidecar
+   hsi.write("output.hsd", metadata_json=True)
+
+   # Read it back — wavelengths are loaded from the sidecar
+   hsi_back = HSI.read("output.hsd", metadata_json=True)
+
+   # PNG folder: no need to pass wavelengths= explicitly
+   hsi.write("output_folder/", metadata_json=True)
+   hsi_back = HSI.read("output_folder/", metadata_json=True)
+
 Lower-level writer functions are also available:
 
 .. code-block:: python

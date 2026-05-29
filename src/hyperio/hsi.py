@@ -28,6 +28,9 @@ class HSI:
 
         self._cube = cube_arr
         self.wavelengths = wl_arr
+        self._reference_spectrum: np.ndarray | None = None
+        self._reference_multiplier: float = 1.0
+        self._reference_eps: float = 1e-8
 
     @property
     def shape(self) -> tuple[int, int, int]:
@@ -64,6 +67,18 @@ class HSI:
     @property
     def cube(self) -> np.ndarray:
         return self._cube
+
+    @property
+    def reference_spectrum(self) -> np.ndarray | None:
+        return self._reference_spectrum
+
+    @property
+    def reference_multiplier(self) -> float:
+        return self._reference_multiplier
+
+    @property
+    def reference_eps(self) -> float:
+        return self._reference_eps
 
     def copy(self) -> "HSI":
         return HSI(self._cube.copy(), self.wavelengths.copy())
@@ -132,6 +147,7 @@ class HSI:
         max_wavelength: float | None = None,
         line_cam: bool = True,
         normalize: bool = True,
+        metadata_json: bool = False,
     ) -> "HSI":
         result = read_auto(
             path,
@@ -140,8 +156,13 @@ class HSI:
             max_wavelength=max_wavelength,
             line_cam=line_cam,
             normalize=normalize,
+            metadata_json=metadata_json,
         )
-        return cls(result.cube, result.wavelengths)
+        hsi = cls(result.cube, result.wavelengths)
+        hsi._reference_spectrum = result.reference_spectrum
+        hsi._reference_multiplier = result.reference_multiplier
+        hsi._reference_eps = result.reference_eps
+        return hsi
 
     def write(self, path: str | Path, **kwargs: Any) -> Path:
         """Write the HSI to disk. Format is inferred from the file extension.
@@ -153,6 +174,10 @@ class HSI:
         store where possible (ENVI header, TIFF ImageJ metadata, JP2
         band tags, HSD header).  PNG folders do not store wavelengths.
 
+        If ``metadata_json=True``, a JSON sidecar file is written
+        alongside the image containing full wavelength and reference
+        spectrum metadata.
+
         For PNG folder output, pass ``line_cam=True`` (default) or
         ``line_cam=False`` via *kwargs*.
 
@@ -161,10 +186,26 @@ class HSI:
         from .io import write_png_folder
 
         p = Path(path)
+        metadata_json = kwargs.get("metadata_json", False)
+        ref_kw: dict[str, Any] = {}
+        if self._reference_spectrum is not None:
+            ref_kw["reference_spectrum"] = self._reference_spectrum
+            ref_kw["reference_multiplier"] = self._reference_multiplier
+            ref_kw["reference_eps"] = self._reference_eps
+
         if p.is_dir() or (not p.suffix):
             line_cam = kwargs.get("line_cam", True)
-            return write_png_folder(self._cube, self.wavelengths, p, line_cam=line_cam)
-        return write_auto(self._cube, self.wavelengths, p)
+            return write_png_folder(
+                self._cube, self.wavelengths, p,
+                line_cam=line_cam,
+                metadata_json=metadata_json,
+                **ref_kw,
+            )
+        return write_auto(
+            self._cube, self.wavelengths, p,
+            metadata_json=metadata_json,
+            **ref_kw,
+        )
 
     def nearest_band_index(self, wavelength: float) -> int:
         idx = int(np.argmin(np.abs(self.wavelengths - np.float32(wavelength))))

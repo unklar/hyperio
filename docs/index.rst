@@ -14,6 +14,8 @@ Features
 - Wavelength-aware band access and RGB rendering.
 - **Readers and writers** for **ENVI**, **JPEG 2000**, **TIFF**, **HSD**,
   and **PNG folder** formats.
+- **JSON sidecar metadata** (``metadata_json=True``) for exact
+  wavelength round-trips across all formats.
 - Unified read/write API with optional explicit wavelength overrides.
 - Savitzky-Golay spectral smoothing, spatial resizing, and spectral index
   computation.

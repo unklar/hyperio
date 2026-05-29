@@ -61,6 +61,74 @@ based on the file extension:
 - ``.hsd`` → :func:`~hyperio.io.write_hsd`
 - directory (or no extension) → :func:`~hyperio.io.write_png_folder`
 
+JSON sidecar metadata (``metadata_json``)
+------------------------------------------
+
+All readers and writers accept a ``metadata_json=True`` argument that
+enables a **JSON sidecar file** alongside the image.  The sidecar
+stores the full wavelength vector, reference spectrum, and
+normalization parameters in an unambiguous, format-independent way.
+
+**Sidecar naming convention:**
+
+- For file paths: ``cube.hdr`` → ``cube.json``, ``cube.jp2`` → ``cube.json``, etc.
+- For directories (PNG folder): ``folder/`` → ``folder/metadata.json``
+
+**Sidecar contents** (all fields except ``wavelengths`` are optional):
+
+.. code-block:: json
+
+   {
+     "wavelengths": [383.83, 385.86, ...],
+     "reference_spectrum": [17.0, 19.0, ...],
+     "reference_multiplier": 2.0,
+     "reference_eps": 1e-6
+   }
+
+When ``metadata_json=True`` is passed to a **reader**, the sidecar is
+loaded and its wavelength data takes priority over any embedded
+format-specific metadata (but is still overridden by an explicit
+``wavelengths`` parameter).  If the sidecar does not exist, the reader
+falls back to embedded metadata as usual.
+
+When ``metadata_json=True`` is passed to a **writer**, the sidecar is
+written in addition to the format-specific image file.  This is
+especially useful for:
+
+- **HSD**: preserves the full wavelength vector instead of only integer
+  endpoints, enabling exact round-trips.
+- **PNG folders**: stores wavelengths so that ``read`` no longer
+  requires an explicit ``wavelengths`` argument.
+- **JP2**: provides a reliable, easily-parseable copy of the wavelength
+  data that does not depend on rasterio band tag support.
+
+The ``HSI.write`` method forwards ``metadata_json`` and any reference
+spectrum attached to the ``HSI`` instance:
+
+.. code-block:: python
+
+   # Write with a JSON sidecar
+   hsi.write("cube.hsd", metadata_json=True)
+
+   # Read it back — no explicit wavelengths needed even for HSD
+   hsi_back = HSI.read("cube.hsd", metadata_json=True)
+   np.testing.assert_allclose(hsi_back.wavelengths, hsi.wavelengths)
+
+Lower-level writer functions also accept ``metadata_json``,
+``reference_spectrum``, ``reference_multiplier``, and ``reference_eps``:
+
+.. code-block:: python
+
+   from hyperio.io import write_hsd
+
+   write_hsd(
+       cube, wavelengths, "cube.hsd",
+       metadata_json=True,
+       reference_spectrum=ref,
+       reference_multiplier=2.0,
+       reference_eps=1e-6,
+   )
+
 Wavelength resolution order
 ---------------------------
 
@@ -69,7 +137,8 @@ order:
 
 1. **Explicit** ``wavelengths`` parameter (always wins if provided).
 2. **Range** ``min_wavelength`` + ``max_wavelength`` (linearly spaced).
-3. **Embedded** metadata extracted from the file itself (format-specific).
+3. **JSON sidecar** (when ``metadata_json=True`` and the ``.json`` file exists).
+4. **Embedded** metadata extracted from the file itself (format-specific).
 
 If none are available, a ``ValueError`` is raised.
 
@@ -83,7 +152,7 @@ metadata store where possible:
 - **HSD**: only integer start/end endpoints in the header (approximate;
   intermediate wavelengths are reconstructed via ``linspace``).
 - **PNG folder**: no wavelength storage — wavelengths must be persisted
-  separately by the caller.
+  separately by the caller (or via ``metadata_json=True``).
 
 Round-trip fidelity
 -------------------
@@ -106,10 +175,10 @@ and reading back data:
      - Exact
    * - JP2
      - Approximate (lossy compression + uint16 quantization)
-     - Exact (via band tags)
+     - Exact (via band tags or JSON sidecar)
    * - HSD
      - Exact (float32 raw cube)
-     - Approximate (integer endpoints only)
+     - Approximate (integer endpoints only); **exact with ``metadata_json=True``**
    * - PNG folder
      - Approximate (uint16 quantization; values > 1.0 clipped)
-     - None
+     - None (without sidecar); **exact with ``metadata_json=True``**

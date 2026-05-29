@@ -8,6 +8,7 @@ Python library for hyperspectral image I/O and processing with a NumPy-like `HSI
 - Integer input is automatically normalized to `[0.0, 1.0]`.
 - Wavelength-aware band access and RGB rendering.
 - Readers **and writers** for ENVI, JPEG 2000, TIFF, HSD, and PNG folder formats.
+- **JSON sidecar metadata** (`metadata_json=True`) for exact wavelength round-trips across all formats.
 - Unified read/write API with optional explicit wavelength overrides.
 - Savitzky-Golay spectral smoothing, spatial resizing, and spectral index computation.
 
@@ -25,7 +26,7 @@ Python library for hyperspectral image I/O and processing with a NumPy-like `HSI
 ## Installation
 
 ```bash
-pip install hyperio
+pip install git+https://github.com/unklar/hyperio.git
 ```
 
 ## Quick Usage
@@ -101,6 +102,35 @@ from hyperio.io import write_envi, write_tiff, write_jp2, write_hsd, write_png_f
 path = write_envi(hsi.cube, hsi.wavelengths, "output.hdr")
 ```
 
+## JSON Sidecar Metadata
+
+Pass `metadata_json=True` to write or read a JSON sidecar file alongside the image. The sidecar stores the full wavelength vector and optional reference spectrum, enabling **exact wavelength round-trips** even for formats that normally lose precision (HSD, PNG folder):
+
+```python
+# Write with a JSON sidecar
+hsi.write("output.hsd", metadata_json=True)
+
+# Read it back — wavelengths are loaded from the sidecar
+hsi_back = HSI.read("output.hsd", metadata_json=True)
+
+# PNG folder: no need to pass wavelengths= explicitly
+hsi.write("output_folder/", metadata_json=True)
+hsi_back = HSI.read("output_folder/", metadata_json=True)
+```
+
+Sidecar naming: `cube.hdr` → `cube.json`, `cube.jp2` → `cube.json`, `folder/` → `folder/metadata.json`.
+
+Sidecar contents (only `wavelengths` is required; other fields are included when non-default):
+
+```json
+{
+  "wavelengths": [383.83, 385.86, ...],
+  "reference_spectrum": [17.0, 19.0, ...],
+  "reference_multiplier": 2.0,
+  "reference_eps": 1e-6
+}
+```
+
 ## I/O Functions
 
 Lower-level readers are available directly:
@@ -112,7 +142,7 @@ result = read_envi("cube.hdr")
 print(result.cube.shape, result.wavelengths.shape)
 ```
 
-Each reader returns a `ReadResult(cube, wavelengths)` dataclass.
+Each reader returns a `ReadResult(cube, wavelengths, reference_spectrum, reference_multiplier, reference_eps)` dataclass.
 
 ## Processing
 
