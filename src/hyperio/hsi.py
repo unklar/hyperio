@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Callable
 
@@ -15,6 +16,8 @@ from ._utils import (
     resize_hsi,
     to_float32_cube,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 class HSI:
@@ -81,7 +84,45 @@ class HSI:
         return self._reference_eps
 
     def copy(self) -> "HSI":
-        return HSI(self._cube.copy(), self.wavelengths.copy())
+        new = HSI(self._cube.copy(), self.wavelengths.copy())
+        if self._reference_spectrum is not None:
+            new._reference_spectrum = self._reference_spectrum.copy()
+        new._reference_multiplier = self._reference_multiplier
+        new._reference_eps = self._reference_eps
+        return new
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, HSI):
+            return NotImplemented
+        return (
+            self.shape == other.shape
+            and np.allclose(self._cube, other._cube)
+            and np.allclose(self.wavelengths, other.wavelengths)
+        )
+
+    def __hash__(self) -> int:
+        raise TypeError("HSI objects are not hashable")
+
+    def subset_wavelengths(self, min_wl: float, max_wl: float) -> "HSI":
+        """Return a new HSI containing only bands within [min_wl, max_wl].
+
+        Useful for extracting a spectral region of interest without
+        manually indexing the cube.
+        """
+        mask = (self.wavelengths >= min_wl) & (self.wavelengths <= max_wl)
+        if not np.any(mask):
+            raise ValueError(
+                f"No wavelengths found in range [{min_wl}, {max_wl}]. "
+                f"Available range: [{self.wavelengths.min():.1f}, {self.wavelengths.max():.1f}]"
+            )
+        new_cube = self._cube[:, :, mask]
+        new_wl = self.wavelengths[mask]
+        new_hsi = HSI(new_cube, new_wl)
+        if self._reference_spectrum is not None:
+            new_hsi._reference_spectrum = self._reference_spectrum[mask]
+        new_hsi._reference_multiplier = self._reference_multiplier
+        new_hsi._reference_eps = self._reference_eps
+        return new_hsi
 
     @classmethod
     def from_cube(

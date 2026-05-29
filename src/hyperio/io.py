@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import pathlib
 import re
 import struct
@@ -22,6 +23,8 @@ from ._utils import (
     to_float32_cube,
     try_parse_wavelengths_from_xml_like_text,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -155,6 +158,12 @@ def _align_wavelength_count(wavelengths: np.ndarray, channels: int) -> np.ndarra
                 if seg.size == channels and 250.0 <= float(seg.min()) <= 3000.0 and 250.0 <= float(seg.max()) <= 3000.0:
                     return seg
 
+    _logger.warning(
+        "_align_wavelength_count: extracted %d wavelength values but cube has %d channels; "
+        "truncating to first %d values. Pass wavelengths explicitly or use metadata_json=True "
+        "to avoid this.",
+        wl.size, channels, channels,
+    )
     return wl[:channels]
 
 
@@ -388,7 +397,10 @@ def read_envi(
     cube = normalize_to_hwc(cube)
     cube = to_float32_cube(cube)
 
-    extracted = parse_envi_wavelengths(img.metadata.get("wavelength"))
+    try:
+        extracted = parse_envi_wavelengths(img.metadata.get("wavelength"))
+    except ValueError:
+        extracted = None
     if sidecar_wavelengths is not None:
         extracted = sidecar_wavelengths
     wl = _resolve_wavelengths(
@@ -777,10 +789,12 @@ def read_line_scan_png_folder(
     numbered_pngs.sort(key=lambda item: item[0])
 
     if line_cam:
-        line_images: list[np.ndarray] = []
+        n_lines = len(numbered_pngs)
         expected_shape: tuple[int, int] | None = None
-        for _, file_path in numbered_pngs:
-            arr = np.asarray(Image.open(file_path))
+        first_arr: np.ndarray | None = None
+        for idx, (_, file_path) in enumerate(numbered_pngs):
+            with Image.open(file_path) as img:
+                arr = np.asarray(img)
             if arr.ndim != 2:
                 raise ValueError(
                     f"Line-scan PNG must be 2D (height, spectrum), got shape {arr.shape} in {file_path.name}"
@@ -799,20 +813,20 @@ def read_line_scan_png_folder(
 
             if expected_shape is None:
                 expected_shape = (int(line.shape[0]), int(line.shape[1]))
+                cube = np.empty((expected_shape[0], n_lines, expected_shape[1]), dtype=line.dtype)
             elif line.shape != expected_shape:
                 raise ValueError(
                     f"All line-scan PNG files must have identical normalized shape. "
                     f"Expected {expected_shape}, got {line.shape} in {file_path.name}"
                 )
 
-            line_images.append(line)
-
-        cube = np.stack(line_images, axis=1)
+            cube[:, idx, :] = line
     else:
-        channel_images: list[np.ndarray] = []
-        expected_shape: tuple[int, int] | None = None
-        for _, file_path in numbered_pngs:
-            arr = np.asarray(Image.open(file_path))
+        n_channels = len(numbered_pngs)
+        expected_shape = None
+        for idx, (_, file_path) in enumerate(numbered_pngs):
+            with Image.open(file_path) as img:
+                arr = np.asarray(img)
             if arr.ndim != 2:
                 raise ValueError(
                     f"Channel PNG must be 2D (height, width), got shape {arr.shape} in {file_path.name}"
@@ -820,15 +834,14 @@ def read_line_scan_png_folder(
 
             if expected_shape is None:
                 expected_shape = (int(arr.shape[0]), int(arr.shape[1]))
+                cube = np.empty((expected_shape[0], expected_shape[1], n_channels), dtype=arr.dtype)
             elif arr.shape != expected_shape:
                 raise ValueError(
                     f"All channel PNG files must have identical shape. "
                     f"Expected {expected_shape}, got {arr.shape} in {file_path.name}"
                 )
 
-            channel_images.append(arr)
-
-        cube = np.stack(channel_images, axis=2)
+            cube[:, :, idx] = arr
 
     cube = to_float32_cube(cube)
 
@@ -1015,6 +1028,11 @@ def write_jp2(
     from rasterio.transform import from_bounds
 
     h, w, c = cube.shape
+    if np.any(cube > 1.0) or np.any(cube < 0.0):
+        _logger.warning(
+            "write_jp2: cube contains values outside [0, 1]; "
+            "they will be clipped during uint16 conversion."
+        )
     cube_uint16 = np.clip(cube * 65535.0, 0, 65535).astype(np.uint16)
     transform = from_bounds(0, 0, w, h, w, h)
     with rasterio.open(
@@ -1121,6 +1139,18 @@ def write_png_folder(
     """
     p = pathlib.Path(folder)
     p.mkdir(parents=True, exist_ok=True)
+
+    if np.any(cube > 1.0) or np.any(cube < 0.0):
+        _logger.warning(
+            "write_png_folder: cube contains values outside [0, 1]; "
+            "they will be clipped during uint16 conversion."
+        )
+    if not metadata_json:
+        _logger.warning(
+            "write_png_folder: PNG files do not store wavelength metadata. "
+            "Use metadata_json=True to save a JSON sidecar, or pass "
+            "wavelengths= explicitly when reading."
+        )
 
     if line_cam:
         for i in range(cube.shape[1]):

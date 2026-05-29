@@ -155,6 +155,9 @@ small = hsi.resize(width=256, height=256)
 
 # Value rescaling
 half = hsi.rescale(0.5)
+
+# Extract a spectral region of interest
+vis_nir = hsi.subset_wavelengths(500.0, 700.0)
 ```
 
 ## Documentation

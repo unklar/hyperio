@@ -8,9 +8,19 @@ from skimage.transform import resize as sk_resize
 
 
 def to_float32_cube(arr: np.ndarray) -> np.ndarray:
-    """Convert an array to float32. Integer arrays are normalized to [0, 1]."""
+    """Convert an array to float32. Integer arrays are normalized to [0, 1].
+
+    For unsigned integer types, divides by ``iinfo.max``.
+    For signed integer types, shifts and scales so that the full
+    integer range maps to ``[0, 1]``: ``(arr - min) / (max - min)``.
+    """
     if np.issubdtype(arr.dtype, np.integer):
         info = np.iinfo(arr.dtype)
+        if np.issubdtype(arr.dtype, np.signedinteger):
+            denom = float(info.max - info.min)
+            if denom <= 0.0:
+                return arr.astype(np.float32)
+            return (arr.astype(np.float32) - float(info.min)) / denom
         denom = float(info.max)
         if denom <= 0.0:
             return arr.astype(np.float32)

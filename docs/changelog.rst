@@ -26,6 +26,43 @@ Added JSON sidecar metadata (``metadata_json``):
 - ``HSI`` class now stores and forwards reference spectrum data on
   write
 
+New features:
+
+- ``HSI.subset_wavelengths(min_wl, max_wl)`` — extract a spectral
+  region of interest as a new ``HSI`` object
+- ``HSI.__eq__`` — value-based equality comparison of cube and
+  wavelengths
+- ``HSI.__hash__`` raises ``TypeError`` (HSI objects are unhashable)
+
+Bug fixes:
+
+- ``HSI.copy()`` now preserves ``reference_spectrum``,
+  ``reference_multiplier``, and ``reference_eps``
+- ``read_envi`` no longer crashes with an unhelpful error when the
+  ENVI header has no wavelength metadata; it now falls through to
+  ``_resolve_wavelengths`` which produces a clear error message
+- ``to_float32_cube`` now correctly normalizes signed integer arrays
+  (e.g. ``int8``) to ``[0, 1]`` using ``(arr - min) / (max - min)``
+  instead of ``arr / max``
+
+Safety and diagnostics:
+
+- ``write_jp2`` and ``write_png_folder`` now log a warning when the
+  cube contains values outside ``[0, 1]`` that will be clipped during
+  uint16 conversion
+- ``write_png_folder`` warns when ``metadata_json`` is not enabled,
+  since wavelengths will be lost
+- ``_align_wavelength_count`` logs a warning when truncating
+  wavelength arrays that exceed the channel count
+- ``read_line_scan_png_folder`` now uses ``with Image.open(...)`` to
+  ensure file handles are released promptly
+
+Performance:
+
+- ``read_line_scan_png_folder`` now pre-allocates the output cube and
+  fills it in-place instead of building a list of arrays then
+  stacking (reduces peak memory by ~50%)
+
 Other improvements:
 
 - ``read_jp2`` now falls back to rasterio band tags when no
@@ -35,6 +72,7 @@ Other improvements:
   endpoints to reduce rounding error
 - Full round-trip test suite (19 tests) covering all formats
 - JSON sidecar test suite (21 tests) covering all formats
+- Code review fix test suite (13 tests)
 
 v0.1.0 (2025)
 --------------
