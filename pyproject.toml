@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hyperio"
-version = "0.1.0"
+version = "0.3.0"
 description = "Hyperspectral image I/O and processing with a NumPy-like HSI class"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -25,6 +25,7 @@ classifiers = [
 dependencies = [
     "numpy>=1.24",
     "scikit-image>=0.22",
+    "scikit-learn>=1.0",
     "scipy>=1.10",
     "spectral>=0.23",
     "tifffile>=2024.0.0",

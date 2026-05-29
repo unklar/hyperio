@@ -10,14 +10,25 @@ from scipy.signal import savgol_filter
 from .io import read_auto, write_auto
 from ._utils import (
     average_window,
+    continuum_remove_spectrum,
     ensure_wavelengths_match_channels,
+    kmeans_plusplus_init,
+    normalize_l2,
+    normalize_mean,
+    normalize_minmax,
+    normalize_reference,
     normalize_to_hwc,
     percentile_stretch,
     resize_hsi,
+    sid_distance,
+    spectral_angle,
     to_float32_cube,
+    upper_convex_hull_points,
 )
 
 _logger = logging.getLogger(__name__)
+
+_SUPPORTED_KMEANS_METRICS = ("euclidean", "sam", "correlation", "sid", "manhattan", "chebyshev")
 
 
 class HSI:
@@ -292,8 +303,204 @@ class HSI:
         resized = resize_hsi(self._cube, width=width, height=height)
         return HSI(resized, self.wavelengths)
 
-    def filter_savgol(self, window_length: int = 31, polyorder: int = 3) -> "HSI":
-        """Apply Savitzky-Golay filtering to each pixel spectrum and return a new HSI."""
+    # ---- Spatial crop ----
+
+    def crop(self, y1: int, y2: int, x1: int, x2: int) -> "HSI":
+        """Return a new HSI with the spatial subregion [y1:y2, x1:x2].
+
+        Indices are clamped to image bounds.  Raises ``ValueError``
+        if the clamped region is empty.
+        """
+        h, w = self.shape[0], self.shape[1]
+        y1, y2 = max(0, y1), min(h, y2)
+        x1, x2 = max(0, x1), min(w, x2)
+        if y1 >= y2 or x1 >= x2:
+            raise ValueError(f"Empty crop region after clamping: y=[{y1},{y2}), x=[{x1},{x2})")
+        new_cube = self._cube[y1:y2, x1:x2, :]
+        new_hsi = HSI(new_cube, self.wavelengths.copy())
+        if self._reference_spectrum is not None:
+            new_hsi._reference_spectrum = self._reference_spectrum.copy()
+        new_hsi._reference_multiplier = self._reference_multiplier
+        new_hsi._reference_eps = self._reference_eps
+        return new_hsi
+
+    # ---- Masked spectra extraction ----
+
+    def mask_spectra(self, mask: np.ndarray, label: int | None = None) -> np.ndarray:
+        """Extract spectra at masked pixels as a 2D array (N, C).
+
+        Args:
+            mask: 2D boolean array of shape (H, W), or a 2D integer
+                label map.  When *label* is provided, pixels equal to
+                *label* are selected from the integer map.
+            label: If *mask* is an integer label map, select pixels
+                equal to this value.
+
+        Returns:
+            (N, C) float32 array of selected spectra.
+        """
+        mask = np.asarray(mask)
+        if mask.ndim != 2:
+            raise ValueError(f"mask must be 2D, got shape {mask.shape}")
+        if mask.shape != self.shape[:2]:
+            raise ValueError(f"mask shape {mask.shape} doesn't match image spatial shape {self.shape[:2]}")
+        if label is not None:
+            bool_mask = mask == label
+        elif mask.dtype == bool:
+            bool_mask = mask
+        else:
+            bool_mask = mask != 0
+        return self._cube[bool_mask].astype(np.float32)
+
+    # ---- Predefined spectral indices ----
+
+    def ndvi(self, nir: float = 800.0, red: float = 670.0, **kw: Any) -> np.ndarray:
+        return self.compute_index(lambda nir, red: (nir - red) / (nir + red + 1e-6), nir=nir, red=red, **kw)
+
+    def ndwi(self, green: float = 560.0, nir: float = 800.0, **kw: Any) -> np.ndarray:
+        return self.compute_index(lambda green, nir: (green - nir) / (green + nir + 1e-6), green=green, nir=nir, **kw)
+
+    def mndwi(self, green: float = 560.0, swir: float = 1240.0, **kw: Any) -> np.ndarray:
+        return self.compute_index(lambda green, swir: (green - swir) / (green + swir + 1e-6), green=green, swir=swir, **kw)
+
+    def evi(self, nir: float = 800.0, red: float = 670.0, blue: float = 470.0, **kw: Any) -> np.ndarray:
+        return self.compute_index(
+            lambda nir, red, blue: 2.5 * (nir - red) / (nir + 6.0 * red - 7.5 * blue + 1.0),
+            nir=nir, red=red, blue=blue, **kw,
+        )
+
+    def savi(self, nir: float = 800.0, red: float = 670.0, L: float = 0.5, **kw: Any) -> np.ndarray:
+        return self.compute_index(
+            lambda nir, red: (nir - red) * (1.0 + L) / (nir + red + L),
+            nir=nir, red=red, **kw,
+        )
+
+    def msavi(self, nir: float = 800.0, red: float = 670.0, **kw: Any) -> np.ndarray:
+        return self.compute_index(
+            lambda nir, red: (2.0 * nir + 1.0 - np.sqrt((2.0 * nir + 1.0) ** 2 - 8.0 * (nir - red))) / 2.0,
+            nir=nir, red=red, **kw,
+        )
+
+    def mcari(self, r700: float = 700.0, r670: float = 670.0, r550: float = 550.0, **kw: Any) -> np.ndarray:
+        return self.compute_index(
+            lambda r700, r670, r550: ((r700 - r670) - 0.2 * (r700 - r550)) * (r700 / (r670 + 1e-6)),
+            r700=r700, r670=r670, r550=r550, **kw,
+        )
+
+    def pri(self, r531: float = 531.0, r570: float = 570.0, **kw: Any) -> np.ndarray:
+        return self.compute_index(
+            lambda r531, r570: (r531 - r570) / (r531 + r570 + 1e-6),
+            r531=r531, r570=r570, **kw,
+        )
+
+    # ---- Continuum removal ----
+
+    def continuum_remove(self, per_pixel: bool = False) -> "HSI":
+        """Remove the convex-hull continuum from spectra.
+
+        When *per_pixel* is False (default), the continuum is computed
+        from the mean spectrum and applied to all pixels — fast and
+        suitable for most use cases.  When *per_pixel* is True, a
+        per-pixel hull is computed (accurate but slow for large images).
+        """
+        h, w, c = self.shape
+        wavelengths = self.wavelengths
+
+        if not per_pixel:
+            mean_spec = self._cube.mean(axis=(0, 1))
+            hull_wl, hull_vals = upper_convex_hull_points(mean_spec, wavelengths)
+            continuum = np.interp(wavelengths, hull_wl, hull_vals).astype(np.float32)
+            denom = np.where(continuum > 0, continuum, 1.0)
+            removed = (self._cube / denom).astype(np.float32)
+        else:
+            flat = self._cube.reshape(-1, c)
+            removed_flat = np.empty_like(flat)
+            for i in range(flat.shape[0]):
+                removed_flat[i] = continuum_remove_spectrum(flat[i], wavelengths)
+            removed = removed_flat.reshape(h, w, c)
+
+        new_hsi = HSI(removed, wavelengths.copy())
+        if self._reference_spectrum is not None:
+            new_hsi._reference_spectrum = self._reference_spectrum.copy()
+        new_hsi._reference_multiplier = self._reference_multiplier
+        new_hsi._reference_eps = self._reference_eps
+        return new_hsi
+
+    # ---- Normalization ----
+
+    def normalize(self, method: str = "minmax", **kwargs: Any) -> "HSI":
+        """Normalize the cube and return a new HSI.
+
+        Methods:
+            ``minmax``  — per-band min-max to [0, 1]
+            ``l2``      — per-pixel L2 (unit vector)
+            ``reference`` — divide by white reference spectrum
+            ``mean``    — per-pixel mean-centering
+
+        For ``reference``, pass ``reference_spectrum`` and optionally
+        ``multiplier`` and ``eps`` via *kwargs*, or use the stored
+        reference spectrum.
+        """
+        valid = ("minmax", "l2", "reference", "mean")
+        if method not in valid:
+            raise ValueError(f"Unknown normalization method '{method}'. Choose from {valid}")
+
+        if method == "minmax":
+            normalized = normalize_minmax(self._cube)
+        elif method == "l2":
+            normalized = normalize_l2(self._cube)
+        elif method == "reference":
+            ref = kwargs.get("reference_spectrum", self._reference_spectrum)
+            if ref is None:
+                raise ValueError("No reference spectrum available. Pass reference_spectrum= or load one.")
+            ref = np.asarray(ref, dtype=np.float32)
+            mult = kwargs.get("multiplier", self._reference_multiplier)
+            eps = kwargs.get("eps", self._reference_eps)
+            normalized = normalize_reference(self._cube, ref, mult, eps)
+        elif method == "mean":
+            normalized = normalize_mean(self._cube)
+
+        new_hsi = HSI(normalized, self.wavelengths.copy())
+        if self._reference_spectrum is not None:
+            new_hsi._reference_spectrum = self._reference_spectrum.copy()
+        new_hsi._reference_multiplier = self._reference_multiplier
+        new_hsi._reference_eps = self._reference_eps
+        return new_hsi
+
+    # ---- Savitzky-Golay enhancements ----
+
+    def filter_savgol(
+        self,
+        window_length: int = 31,
+        polyorder: int = 3,
+        *,
+        deriv: int = 0,
+        delta: float = 1.0,
+        window_length_nm: float | None = None,
+    ) -> "HSI":
+        """Apply Savitzky-Golay filtering (and optional derivatives) to each pixel spectrum.
+
+        New in v0.3.0:
+            *deriv* — spectral derivative order (0=smoothing, 1=first
+            derivative, 2=second derivative).
+
+            *delta* — wavelength spacing for derivative scaling.  Defaults
+            to 1.0 (per-sample).  Pass the mean wavelength spacing in nm
+            for physically meaningful derivative units.
+
+            *window_length_nm* — if provided, the window length is
+            computed from the wavelength axis instead of band index.
+            Overrides *window_length*.
+        """
+        if window_length_nm is not None:
+            wl_spacings = np.diff(self.wavelengths)
+            mean_spacing = float(np.median(wl_spacings)) if len(wl_spacings) > 0 else 1.0
+            if mean_spacing <= 0:
+                mean_spacing = 1.0
+            window_length = max(3, int(round(window_length_nm / mean_spacing)))
+            if window_length % 2 == 0:
+                window_length += 1
+
         if window_length <= 0:
             raise ValueError("window_length must be > 0")
         if window_length % 2 == 0:
@@ -311,7 +518,273 @@ class HSI:
             self._cube,
             window_length=window_length,
             polyorder=polyorder,
+            deriv=deriv,
+            delta=delta,
             axis=2,
             mode="interp",
         ).astype(np.float32)
         return HSI(filtered, self.wavelengths)
+
+    # ---- Spectral Angle Mapper ----
+
+    def sam(self, reference: np.ndarray | None = None) -> np.ndarray:
+        """Compute Spectral Angle Mapper between each pixel and a reference.
+
+        Args:
+            reference: 1D reference spectrum of length C.  If None,
+                uses the stored ``reference_spectrum``.
+
+        Returns:
+            2D float32 array of shape (H, W) with angles in radians.
+        """
+        if reference is None:
+            reference = self._reference_spectrum
+        if reference is None:
+            raise ValueError("No reference spectrum available. Pass reference= or load one.")
+        reference = np.asarray(reference, dtype=np.float32)
+
+        h, w, c = self.shape
+        flat = self._cube.reshape(-1, c)
+        angles = spectral_angle(flat, reference)
+        return angles.reshape(h, w)
+
+    # ---- Band statistics ----
+
+    def mean_spectrum(self) -> np.ndarray:
+        """Mean spectrum across all pixels. Shape (C,)."""
+        return self._cube.mean(axis=(0, 1)).astype(np.float32)
+
+    def band_std(self) -> np.ndarray:
+        """Standard deviation per band. Shape (C,)."""
+        return self._cube.std(axis=(0, 1)).astype(np.float32)
+
+    def band_cov(self) -> np.ndarray:
+        """Band covariance matrix. Shape (C, C)."""
+        h, w, c = self.shape
+        flat = self._cube.reshape(-1, c)
+        return np.cov(flat, rowvar=False).astype(np.float32)
+
+    # ---- PCA ----
+
+    def pca(self, n_components: int, whiten: bool = False, random_state: int | None = None) -> "HSI":
+        """Principal Component Analysis transform.
+
+        Returns a new HSI with *n_components* bands.  The returned
+        HSI has metadata attributes ``_pca_explained_variance_ratio_``
+        and ``_pca_components_`` attached.
+        """
+        from sklearn.decomposition import PCA
+
+        h, w, c = self.shape
+        flat = self._cube.reshape(-1, c)
+
+        model = PCA(n_components=n_components, whiten=whiten, random_state=random_state)
+        transformed = model.fit_transform(flat).astype(np.float32)
+
+        new_cube = transformed.reshape(h, w, n_components)
+        new_wl = np.arange(1, n_components + 1, dtype=np.float32)
+        new_hsi = HSI(new_cube, new_wl)
+        new_hsi._pca_explained_variance_ratio_ = model.explained_variance_ratio_.astype(np.float32)
+        new_hsi._pca_components_ = model.components_.astype(np.float32)
+        return new_hsi
+
+    # ---- MNF ----
+
+    def mnf(self, n_components: int) -> "HSI":
+        """Minimum Noise Fraction transform.
+
+        Noise is estimated via shift-difference along both spatial
+        axes.  The data is whitened with respect to the noise
+        covariance, then PCA is applied to the whitened data.
+
+        Returns a new HSI with *n_components* bands.  The returned
+        HSI has metadata attributes ``_mnf_eigenvalues_`` and
+        ``_mnf_noise_fraction_`` attached.
+        """
+        h, w, c = self.shape
+        flat = self._cube.reshape(-1, c)
+
+        noise_bands = []
+        if h > 1:
+            noise_bands.append((self._cube[1:, :, :] - self._cube[:-1, :, :]).reshape(-1, c))
+        if w > 1:
+            noise_bands.append((self._cube[:, 1:, :] - self._cube[:, :-1, :]).reshape(-1, c))
+        if not noise_bands:
+            raise ValueError("Image too small for MNF noise estimation (need at least 2 rows or columns)")
+        noise_data = np.concatenate(noise_bands, axis=0)
+        noise_cov = np.cov(noise_data, rowvar=False).astype(np.float64)
+
+        eigvals, eigvecs = np.linalg.eigh(noise_cov)
+        eigvals = np.maximum(eigvals, 1e-12)
+        whitener = eigvecs @ np.diag(1.0 / np.sqrt(eigvals)) @ eigvecs.T
+
+        whitened = (flat.astype(np.float64) @ whitener).astype(np.float32)
+
+        total_cov = np.cov(whitened, rowvar=False).astype(np.float64)
+        mnf_eigvals, mnf_eigvecs = np.linalg.eigh(total_cov)
+
+        idx = np.argsort(mnf_eigvals)[::-1]
+        mnf_eigvals = mnf_eigvals[idx]
+        mnf_eigvecs = mnf_eigvecs[:, idx]
+
+        n_comp = min(n_components, c)
+        transform = (whitener @ mnf_eigvecs[:, :n_comp]).astype(np.float32)
+        result = (flat @ transform).astype(np.float32)
+
+        new_cube = result.reshape(h, w, n_comp)
+        new_wl = np.arange(1, n_comp + 1, dtype=np.float32)
+        new_hsi = HSI(new_cube, new_wl)
+        new_hsi._mnf_eigenvalues_ = mnf_eigvals[:n_comp].astype(np.float32)
+        noise_fractions = eigvals[idx[:n_comp]] if len(eigvals) >= n_comp else np.zeros(n_comp, dtype=np.float32)
+        new_hsi._mnf_noise_fraction_ = noise_fractions.astype(np.float32)
+        return new_hsi
+
+    # ---- K-means clustering ----
+
+    def kmeans(
+        self,
+        n_clusters: int = 8,
+        metric: str = "euclidean",
+        max_iter: int = 300,
+        n_init: int = 10,
+        random_state: int | None = None,
+    ) -> tuple[np.ndarray, dict[str, Any]]:
+        """K-means clustering with multiple distance metrics.
+
+        Supported metrics:
+            ``euclidean``    — standard Euclidean distance (sklearn)
+            ``sam``          — Spectral Angle Mapper (L2-normalize then Euclidean)
+            ``correlation``  — spectral correlation (mean-center + L2-normalize then Euclidean)
+            ``sid``          — Spectral Information Divergence (custom)
+            ``manhattan``    — L1 / cityblock distance (custom)
+            ``chebyshev``   — L-infinity distance (custom)
+
+        Returns (labels, info) where:
+            labels — 2D int32 array of shape (H, W) with cluster assignments
+            info   — dict with keys ``centroids``, ``inertia``, ``n_iter``, ``metric``
+        """
+        if metric not in _SUPPORTED_KMEANS_METRICS:
+            raise ValueError(f"Unknown metric '{metric}'. Choose from {_SUPPORTED_KMEANS_METRICS}")
+
+        h, w, c = self.shape
+        flat = self._cube.reshape(-1, c)
+
+        if metric in ("euclidean", "sam", "correlation"):
+            return self._kmeans_sklearn(flat, n_clusters, metric, max_iter, n_init, random_state, h, w)
+        return self._kmeans_custom(flat, n_clusters, metric, max_iter, n_init, random_state, h, w, c)
+
+    def _kmeans_sklearn(
+        self,
+        flat: np.ndarray,
+        n_clusters: int,
+        metric: str,
+        max_iter: int,
+        n_init: int,
+        random_state: int | None,
+        h: int,
+        w: int,
+    ) -> tuple[np.ndarray, dict[str, Any]]:
+        from sklearn.cluster import KMeans
+
+        X = flat.copy()
+        if metric == "sam":
+            norms = np.linalg.norm(X, axis=1, keepdims=True)
+            norms[norms < 1e-12] = 1.0
+            X = X / norms
+        elif metric == "correlation":
+            X = X - X.mean(axis=1, keepdims=True)
+            norms = np.linalg.norm(X, axis=1, keepdims=True)
+            norms[norms < 1e-12] = 1.0
+            X = X / norms
+
+        model = KMeans(
+            n_clusters=n_clusters,
+            max_iter=max_iter,
+            n_init=n_init,
+            random_state=random_state,
+            init="k-means++",
+        )
+        labels = model.fit_predict(X)
+
+        centroids = model.cluster_centers_.astype(np.float32)
+        if metric == "sam":
+            norms_c = np.linalg.norm(centroids, axis=1, keepdims=True)
+            norms_c[norms_c < 1e-12] = 1.0
+            centroids = centroids / norms_c
+
+        labels_2d = labels.reshape(h, w).astype(np.int32)
+        info: dict[str, Any] = {
+            "centroids": centroids,
+            "inertia": float(model.inertia_),
+            "n_iter": int(model.n_iter_),
+            "metric": metric,
+        }
+        return labels_2d, info
+
+    def _kmeans_custom(
+        self,
+        flat: np.ndarray,
+        n_clusters: int,
+        metric: str,
+        max_iter: int,
+        n_init: int,
+        random_state: int | None,
+        h: int,
+        w: int,
+        c: int,
+    ) -> tuple[np.ndarray, dict[str, Any]]:
+        from scipy.spatial.distance import cdist
+
+        best_labels = None
+        best_inertia = np.inf
+        best_centroids = None
+        best_n_iter = 0
+
+        for run in range(n_init):
+            rs = random_state + run if random_state is not None else None
+            centroids = kmeans_plusplus_init(flat, n_clusters, metric, random_state=rs)
+
+            labels = np.zeros(flat.shape[0], dtype=np.int32)
+            for iteration in range(max_iter):
+                if metric == "sid":
+                    dists = sid_distance(flat, centroids)
+                elif metric == "manhattan":
+                    dists = cdist(flat, centroids, metric="cityblock")
+                elif metric == "chebyshev":
+                    dists = cdist(flat, centroids, metric="chebyshev")
+                else:
+                    raise ValueError(f"Unsupported custom metric: {metric}")
+
+                new_labels = np.argmin(dists, axis=1).astype(np.int32)
+                if np.array_equal(new_labels, labels) and iteration > 0:
+                    labels = new_labels
+                    break
+                labels = new_labels
+
+                for k in range(n_clusters):
+                    mask = labels == k
+                    if np.any(mask):
+                        centroids[k] = flat[mask].mean(axis=0)
+
+            if metric == "sid":
+                final_dists = sid_distance(flat, centroids)
+            elif metric == "manhattan":
+                final_dists = cdist(flat, centroids, metric="cityblock")
+            else:
+                final_dists = cdist(flat, centroids, metric="chebyshev")
+            inertia = float(final_dists[np.arange(len(labels)), labels].sum())
+
+            if inertia < best_inertia:
+                best_inertia = inertia
+                best_labels = labels.copy()
+                best_centroids = centroids.copy()
+                best_n_iter = iteration + 1
+
+        labels_2d = best_labels.reshape(h, w)
+        info: dict[str, Any] = {
+            "centroids": best_centroids,
+            "inertia": best_inertia,
+            "n_iter": best_n_iter,
+            "metric": metric,
+        }
+        return labels_2d, info

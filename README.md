@@ -10,7 +10,16 @@ Python library for hyperspectral image I/O and processing with a NumPy-like `HSI
 - Readers **and writers** for ENVI, JPEG 2000, TIFF, HSD, and PNG folder formats.
 - **JSON sidecar metadata** (`metadata_json=True`) for exact wavelength round-trips across all formats.
 - Unified read/write API with optional explicit wavelength overrides.
-- Savitzky-Golay spectral smoothing, spatial resizing, and spectral index computation.
+- **Predefined spectral indices**: NDVI, NDWI, MNDWI, EVI, SAVI, MSAVI, MCARI, PRI.
+- **Continuum removal** (convex-hull normalization) in fast or per-pixel mode.
+- **Normalization**: min-max, L2, white-reference, mean-centering.
+- **Savitzky-Golay filtering** with derivative support and wavelength-based window sizing.
+- **Spectral Angle Mapper** (SAM).
+- **Band statistics**: mean, standard deviation, covariance.
+- **PCA and MNF** transforms.
+- **K-means clustering** with six distance metrics (Euclidean, SAM, correlation, SID, Manhattan, Chebyshev).
+- **Masked spectra extraction** for downstream analysis.
+- Spatial cropping and resizing.
 
 ## Supported File Formats
 
@@ -38,20 +47,8 @@ hsi = HSI.read("image.hdr")
 red = hsi.nearest_band(670.0)
 rgb = hsi.rgb()
 
-# NDVI with compute_index
-ndvi = hsi.compute_index(
-    lambda nir, red: (nir - red) / (nir + red + 1e-6),
-    nir=800.0,
-    red=670.0,
-)
-
-# MCARI with compute_index
-mcari = hsi.compute_index(
-    lambda r700, r670, r550: ((r700 - r670) - 0.2 * (r700 - r550)) * (r700 / (r670 + 1e-6)),
-    r700=700.0,
-    r670=670.0,
-    r550=550.0,
-)
+# NDVI
+ndvi = hsi.ndvi()
 
 # Build from raw data with explicit wavelengths
 hsi_from_wl = HSI.from_cube(cube, wavelengths=[500.0, 510.0, 520.0])
@@ -62,14 +59,56 @@ hsi_from_range = HSI.from_cube(
     min_wavelength=500.0,
     max_wavelength=520.0,
 )
+```
 
-# Custom spectral resolution
-hsi_from_range_custom = HSI.from_cube(
-    cube,
-    min_wavelength=500.0,
-    max_wavelength=520.0,
-    spectral_resolution=10.0,
-)
+## Processing
+
+```python
+# Spatial crop
+cropped = hsi.crop(50, 200, 100, 300)
+
+# Extract masked spectra as (N, C) array
+labels, info = hsi.kmeans(n_clusters=5)
+class3 = hsi.mask_spectra(labels, label=3)
+
+# Predefined indices
+ndvi = hsi.ndvi()
+evi = hsi.evi()
+
+# Spectral smoothing and derivatives
+smoothed = hsi.filter_savgol(window_length=15, polyorder=3)
+deriv1 = hsi.filter_savgol(window_length=15, polyorder=3, deriv=1, delta=2.0)
+smoothed_nm = hsi.filter_savgol(window_length_nm=50.0, polyorder=3)
+
+# Continuum removal
+removed = hsi.continuum_remove()
+
+# Normalization
+normed = hsi.normalize("minmax")
+normed = hsi.normalize("l2")
+normed = hsi.normalize("reference")
+normed = hsi.normalize("mean")
+
+# Spectral Angle Mapper
+angles = hsi.sam(reference=my_ref)
+
+# Band statistics
+mean = hsi.mean_spectrum()
+std = hsi.band_std()
+cov = hsi.band_cov()
+
+# PCA and MNF
+pca_hsi = hsi.pca(n_components=10)
+mnf_hsi = hsi.mnf(n_components=10)
+
+# K-means clustering
+labels, info = hsi.kmeans(n_clusters=5, metric="euclidean")
+labels, info = hsi.kmeans(n_clusters=5, metric="sam")
+labels, info = hsi.kmeans(n_clusters=5, metric="sid")
+
+# Resize and rescale
+small = hsi.resize(width=256, height=256)
+half = hsi.rescale(0.5)
 ```
 
 ## Writing HSI Data
@@ -144,21 +183,16 @@ print(result.cube.shape, result.wavelengths.shape)
 
 Each reader returns a `ReadResult(cube, wavelengths, reference_spectrum, reference_multiplier, reference_eps)` dataclass.
 
-## Processing
+## K-means Distance Metrics
 
-```python
-# Spectral smoothing
-smoothed = hsi.filter_savgol(window_length=15, polyorder=3)
-
-# Spatial resize
-small = hsi.resize(width=256, height=256)
-
-# Value rescaling
-half = hsi.rescale(0.5)
-
-# Extract a spectral region of interest
-vis_nir = hsi.subset_wavelengths(500.0, 700.0)
-```
+| Metric | Description | Implementation |
+|--------|-------------|----------------|
+| `euclidean` | Standard Euclidean distance | scikit-learn KMeans |
+| `sam` | Spectral Angle Mapper | L2-normalize then Euclidean |
+| `correlation` | Spectral correlation | Mean-center + L2-normalize then Euclidean |
+| `sid` | Spectral Information Divergence | Custom with k-means++ init |
+| `manhattan` | L1 / cityblock distance | Custom with k-means++ init |
+| `chebyshev` | L-infinity distance | Custom with k-means++ init |
 
 ## Documentation
 

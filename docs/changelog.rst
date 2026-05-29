@@ -1,6 +1,46 @@
 Changelog
 =========
 
+v0.3.0 (2025)
+--------------
+
+New processing features:
+
+- ``HSI.crop(y1, y2, x1, x2)`` — spatial cropping with boundary clamping
+- ``HSI.mask_spectra(mask, label=)`` — extract spectra at masked pixels
+  as a 2D ``(N, C)`` array
+- Predefined spectral indices: ``ndvi``, ``ndwi``, ``mndwi``, ``evi``,
+  ``savi``, ``msavi``, ``mcari``, ``pri`` — each wraps ``compute_index``
+  with default wavelengths and accepts wavelength overrides
+- ``HSI.continuum_remove(per_pixel=False)`` — convex-hull continuum
+  removal; fast mode uses the mean spectrum's hull, per-pixel mode
+  computes individual hulls
+- ``HSI.normalize(method=)`` — normalization with four methods:
+  ``minmax`` (per-band), ``l2`` (per-pixel unit vector), ``reference``
+  (white-reference division), ``mean`` (per-pixel mean-centering)
+- ``HSI.filter_savgol`` now accepts ``deriv`` (spectral derivative
+  order), ``delta`` (wavelength spacing for physical units), and
+  ``window_length_nm`` (window length in nanometers instead of band
+  count)
+- ``HSI.sam(reference=)`` — Spectral Angle Mapper; returns 2D angle
+  map in radians, uses stored reference spectrum or explicit array
+- ``HSI.mean_spectrum()``, ``HSI.band_std()``, ``HSI.band_cov()`` —
+  band-level statistics
+- ``HSI.pca(n_components, whiten=)`` — Principal Component Analysis
+  transform using scikit-learn; attaches
+  ``_pca_explained_variance_ratio_`` and ``_pca_components_`` metadata
+- ``HSI.mnf(n_components)`` — Minimum Noise Fraction transform with
+  shift-difference noise estimation; attaches ``_mnf_eigenvalues_``
+  and ``_mnf_noise_fraction_`` metadata
+- ``HSI.kmeans(n_clusters, metric=)`` — K-means clustering with six
+  distance metrics: ``euclidean``, ``sam``, ``correlation``, ``sid``,
+  ``manhattan``, ``chebyshev``; custom k-means++ initialization for
+  all metrics; returns ``(labels_2d, info_dict)``
+
+Dependency changes:
+
+- Added ``scikit-learn>=1.0`` to runtime dependencies
+
 v0.2.0 (2025)
 --------------
 
