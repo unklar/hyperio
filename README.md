@@ -7,20 +7,20 @@ Python library for hyperspectral image I/O and processing with a NumPy-like `HSI
 - Internal cube storage always as `float32` with shape `(H, W, C)`.
 - Integer input is automatically normalized to `[0.0, 1.0]`.
 - Wavelength-aware band access and RGB rendering.
-- Readers for ENVI, JPEG 2000, TIFF, HSD, and PNG folder formats.
-- Unified read API with optional explicit wavelength overrides.
+- Readers **and writers** for ENVI, JPEG 2000, TIFF, HSD, and PNG folder formats.
+- Unified read/write API with optional explicit wavelength overrides.
 - Savitzky-Golay spectral smoothing, spatial resizing, and spectral index computation.
 
 ## Supported File Formats
 
-| Format | Extension(s) | Reader | Wavelength Source | Notes |
-|---|---|---|---|---|
-| ENVI | `.hdr` | `read_envi` | ENVI metadata or explicit | Uses the `spectral` library |
-| JPEG 2000 | `.jp2` | `read_jp2` | Embedded XML/UUID metadata or explicit | Optional reference-spectrum normalization |
-| TIFF | `.tif`, `.tiff` | `read_tiff` | TIFF metadata or explicit | Uses `tifffile` |
-| HSD (HSICityV2) | `.hsd` | `read_hsd` | Embedded header or explicit | Reconstructs cube from PCA coefficients |
-| PNG folder (line-scan) | directory | `read_line_scan_png_folder` | Explicit only | Each PNG = one scan line |
-| PNG folder (channel-stack) | directory | `read_line_scan_png_folder` | Explicit only | Each PNG = one spectral channel; use `line_cam=False` |
+| Format | Extension(s) | Reader | Writer | Wavelength Storage | Round-trip Fidelity |
+|---|---|---|---|---|---|
+| ENVI | `.hdr` | `read_envi` | `write_envi` | ENVI header (exact) | Exact (float32) |
+| JPEG 2000 | `.jp2` | `read_jp2` | `write_jp2` | Rasterio band tags (exact) | Approximate (lossy + uint16) |
+| TIFF | `.tif`, `.tiff` | `read_tiff` | `write_tiff` | ImageJ metadata (exact) | Exact (float32) |
+| HSD (HSICityV2) | `.hsd` | `read_hsd` | `write_hsd` | Integer start/end (approximate) | Exact (float32 raw cube) |
+| PNG folder (line-scan) | directory | `read_line_scan_png_folder` | `write_png_folder` | None | Approximate (uint16; clips >1.0) |
+| PNG folder (channel-stack) | directory | `read_line_scan_png_folder` | `write_png_folder` | None | Approximate (uint16; clips >1.0); use `line_cam=False` |
 
 ## Installation
 
@@ -69,6 +69,36 @@ hsi_from_range_custom = HSI.from_cube(
     max_wavelength=520.0,
     spectral_resolution=10.0,
 )
+```
+
+## Writing HSI Data
+
+The `HSI.write` method infers the output format from the file extension:
+
+```python
+# ENVI format (exact round-trip)
+hsi.write("output.hdr")
+
+# TIFF format (exact round-trip)
+hsi.write("output.tiff")
+
+# JPEG 2000 (lossy; wavelengths preserved via band tags)
+hsi.write("output.jp2")
+
+# HSD format (raw cube; wavelength endpoints only)
+hsi.write("output.hsd")
+
+# PNG folder (uint16; no wavelength storage)
+hsi.write("output_folder/")                     # line_cam=True (default)
+hsi.write("output_folder/", line_cam=False)     # channel-stack mode
+```
+
+Lower-level writer functions are also available:
+
+```python
+from hyperio.io import write_envi, write_tiff, write_jp2, write_hsd, write_png_folder, write_auto
+
+path = write_envi(hsi.cube, hsi.wavelengths, "output.hdr")
 ```
 
 ## I/O Functions

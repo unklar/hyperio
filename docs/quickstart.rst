@@ -30,6 +30,38 @@ Reading an HSI image
        red=670.0,
    )
 
+Writing an HSI image
+--------------------
+
+The :meth:`~hyperio.hsi.HSI.write` method infers the output format from
+the file extension:
+
+.. code-block:: python
+
+   # ENVI format (exact round-trip)
+   hsi.write("output.hdr")
+
+   # TIFF format (exact round-trip)
+   hsi.write("output.tiff")
+
+   # JPEG 2000 (lossy; wavelengths preserved via band tags)
+   hsi.write("output.jp2")
+
+   # HSD format (raw cube; wavelength endpoints only)
+   hsi.write("output.hsd")
+
+   # PNG folder (uint16; no wavelength storage)
+   hsi.write("output_folder/")          # line_cam=True (default)
+   hsi.write("output_folder/", line_cam=False)  # channel-stack mode
+
+Lower-level writer functions are also available:
+
+.. code-block:: python
+
+   from hyperio.io import write_envi, write_tiff, write_jp2, write_hsd, write_png_folder
+
+   path = write_envi(hsi.cube, hsi.wavelengths, "output.hdr")
+
 Building from raw data
 ----------------------
 

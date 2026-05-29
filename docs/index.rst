@@ -12,8 +12,9 @@ Features
 - Internal cube storage always as ``float32`` with shape ``(H, W, C)``.
 - Integer input is automatically normalized to ``[0.0, 1.0]``.
 - Wavelength-aware band access and RGB rendering.
-- Readers for **ENVI**, **JPEG 2000**, **TIFF**, **HSD**, and **PNG folder** formats.
-- Unified read API with optional explicit wavelength overrides.
+- **Readers and writers** for **ENVI**, **JPEG 2000**, **TIFF**, **HSD**,
+  and **PNG folder** formats.
+- Unified read/write API with optional explicit wavelength overrides.
 - Savitzky-Golay spectral smoothing, spatial resizing, and spectral index
   computation.
 

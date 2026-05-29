@@ -6,7 +6,7 @@ from typing import Any, Callable
 import numpy as np
 from scipy.signal import savgol_filter
 
-from .io import read_auto
+from .io import read_auto, write_auto
 from ._utils import (
     average_window,
     ensure_wavelengths_match_channels,
@@ -142,6 +142,29 @@ class HSI:
             normalize=normalize,
         )
         return cls(result.cube, result.wavelengths)
+
+    def write(self, path: str | Path, **kwargs: Any) -> Path:
+        """Write the HSI to disk. Format is inferred from the file extension.
+
+        Supported extensions: ``.hdr`` (ENVI), ``.tif``/``.tiff``,
+        ``.jp2``, ``.hsd``, or a directory path (PNG folder).
+
+        Wavelength metadata is embedded in each format's native metadata
+        store where possible (ENVI header, TIFF ImageJ metadata, JP2
+        band tags, HSD header).  PNG folders do not store wavelengths.
+
+        For PNG folder output, pass ``line_cam=True`` (default) or
+        ``line_cam=False`` via *kwargs*.
+
+        Returns the path of the file that was written.
+        """
+        from .io import write_png_folder
+
+        p = Path(path)
+        if p.is_dir() or (not p.suffix):
+            line_cam = kwargs.get("line_cam", True)
+            return write_png_folder(self._cube, self.wavelengths, p, line_cam=line_cam)
+        return write_auto(self._cube, self.wavelengths, p)
 
     def nearest_band_index(self, wavelength: float) -> int:
         idx = int(np.argmin(np.abs(self.wavelengths - np.float32(wavelength))))

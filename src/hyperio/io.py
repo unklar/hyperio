@@ -366,10 +366,36 @@ def read_tiff(
                             continue
                 if extracted is not None:
                     break
+            elif isinstance(cand, (list, tuple)):
+                for item in cand:
+                    if isinstance(item, dict):
+                        for key in ("wavelength", "wavelengths", "wavelength_nm"):
+                            if key in item:
+                                try:
+                                    extracted = np.asarray(item[key], dtype=np.float32)
+                                    break
+                                except Exception:
+                                    continue
+                        if extracted is not None:
+                            break
+                if extracted is not None:
+                    break
             else:
-                parsed = try_parse_wavelengths_from_xml_like_text(str(cand))
-                if parsed is not None:
-                    extracted = parsed
+                cand_str = str(cand)
+                parsed_dict = _parse_payload_dict(cand_str)
+                if parsed_dict is not None:
+                    for key in ("wavelength", "wavelengths", "wavelength_nm"):
+                        if key in parsed_dict:
+                            try:
+                                extracted = np.asarray(parsed_dict[key], dtype=np.float32)
+                                break
+                            except Exception:
+                                continue
+                if extracted is None:
+                    parsed = try_parse_wavelengths_from_xml_like_text(cand_str)
+                    if parsed is not None:
+                        extracted = parsed
+                if extracted is not None:
                     break
 
     cube = normalize_to_hwc(np.asarray(arr))
@@ -406,6 +432,15 @@ def read_jp2(
     cube = to_float32_cube(cube)
 
     extracted = md.wavelengths
+    if extracted is None:
+        try:
+            with rasterio.open(path) as src:
+                tags = src.tags(1)
+                wl_str = tags.get("wavelength")
+                if wl_str is not None:
+                    extracted = np.asarray(json.loads(wl_str), dtype=np.float32)
+        except Exception:
+            pass
     if extracted is not None:
         extracted = _align_wavelength_count(extracted, int(cube.shape[2]))
 
@@ -440,7 +475,12 @@ def read_hsd(
     min_wavelength: float | None = None,
     max_wavelength: float | None = None,
 ) -> ReadResult:
-    """Read HSICityV2 HSD files and reconstruct the hyperspectral cube."""
+    """Read HSICityV2 HSD files and reconstruct the hyperspectral cube.
+
+    Also supports a simplified raw-cube variant (d=0) written by
+    ``write_hsd``, where the full float32 cube is stored verbatim
+    after the header.
+    """
     header = np.fromfile(path, dtype=np.int32, count=7)
     if header.size != 7:
         raise ValueError("Invalid HSD file: could not read 7 int32 header values")
@@ -452,42 +492,53 @@ def read_hsd(
     startw = float(header[4])
     endw = float(header[6])
 
-    if height <= 0 or width <= 0 or sr <= 0 or d <= 0:
-        raise ValueError("Invalid HSD header values: height, width, SR and D must be > 0")
+    if height <= 0 or width <= 0 or sr <= 0:
+        raise ValueError("Invalid HSD header values: height, width and SR must be > 0")
 
-    total_floats_with_step = 1 + sr + d * sr + height * width * d
-    total_floats_no_step = sr + d * sr + height * width * d
-
-    float_data = np.fromfile(path, dtype=np.float32, count=total_floats_with_step, offset=7 * 4)
-    has_stepw = True
-
-    if float_data.size == total_floats_no_step:
-        has_stepw = False
-    elif float_data.size != total_floats_with_step:
-        raise ValueError(
-            "Invalid HSD file size: "
-            f"expected {total_floats_with_step} (with stepw) or {total_floats_no_step} (without stepw) "
-            f"float32 values after header, got {float_data.size}"
-        )
-
-    idx = 0
-    if has_stepw:
+    if d == 0:
+        total_floats_raw = 1 + sr + height * width * sr
+        float_data = np.fromfile(path, dtype=np.float32, count=total_floats_raw, offset=7 * 4)
+        idx = 0
         _stepw = float_data[idx]
         idx += 1
+        _average = float_data[idx : idx + sr]
+        idx += sr
+        cube = float_data[idx : idx + height * width * sr].reshape((height, width, sr))
+        cube = to_float32_cube(cube)
     else:
-        _stepw = np.float32(np.nan)
+        total_floats_with_step = 1 + sr + d * sr + height * width * d
+        total_floats_no_step = sr + d * sr + height * width * d
 
-    average = float_data[idx : idx + sr]
-    idx += sr
+        float_data = np.fromfile(path, dtype=np.float32, count=total_floats_with_step, offset=7 * 4)
+        has_stepw = True
 
-    coeff = float_data[idx : idx + d * sr].reshape((d, sr))
-    idx += d * sr
+        if float_data.size == total_floats_no_step:
+            has_stepw = False
+        elif float_data.size != total_floats_with_step:
+            raise ValueError(
+                "Invalid HSD file size: "
+                f"expected {total_floats_with_step} (with stepw) or {total_floats_no_step} (without stepw) "
+                f"float32 values after header, got {float_data.size}"
+            )
 
-    scoredata = float_data[idx : idx + height * width * d].reshape((height * width, d))
+        idx = 0
+        if has_stepw:
+            _stepw = float_data[idx]
+            idx += 1
+        else:
+            _stepw = np.float32(np.nan)
 
-    temp = np.dot(scoredata, coeff)
-    cube = (temp + average).reshape((height, width, sr))
-    cube = to_float32_cube(cube)
+        average = float_data[idx : idx + sr]
+        idx += sr
+
+        coeff = float_data[idx : idx + d * sr].reshape((d, sr))
+        idx += d * sr
+
+        scoredata = float_data[idx : idx + height * width * d].reshape((height * width, d))
+
+        temp = np.dot(scoredata, coeff)
+        cube = (temp + average).reshape((height, width, sr))
+        cube = to_float32_cube(cube)
 
     extracted = np.linspace(startw, endw, sr, dtype=np.float32)
     wl = _resolve_wavelengths(
@@ -668,3 +719,204 @@ def read_auto(
         )
 
     raise ValueError(f"Unsupported file extension: {ext}")
+
+
+def write_envi(
+    cube: np.ndarray,
+    wavelengths: np.ndarray,
+    path: str | pathlib.Path,
+) -> pathlib.Path:
+    """Write an HSI cube to ENVI format (raw binary + .hdr header).
+
+    The .hdr file stores wavelength metadata. The raw file uses the same
+    stem with no extension (ENVI convention).  Returns the path to the
+    .hdr file.
+    """
+    p = pathlib.Path(path)
+    hdr_path = p if p.suffix.lower() == ".hdr" else p.with_suffix(".hdr")
+    hdr_path.parent.mkdir(parents=True, exist_ok=True)
+
+    h, w, c = cube.shape
+    meta = {
+        "lines": h,
+        "samples": w,
+        "bands": c,
+        "header_offset": 0,
+        "file_type": "ENVI Standard",
+        "data_type": 4,
+        "interleave": "bsq",
+        "byte_order": 0,
+        "wavelength": wavelengths.tolist(),
+    }
+
+    envi.save_image(str(hdr_path), cube, metadata=meta, interleave="bsq")
+    return hdr_path
+
+
+def write_tiff(
+    cube: np.ndarray,
+    wavelengths: np.ndarray,
+    path: str | pathlib.Path,
+) -> pathlib.Path:
+    """Write an HSI cube to TIFF with wavelength metadata embedded.
+
+    Wavelengths are stored in the ImageJ metadata tag so they survive
+    a round-trip through ``read_tiff``.  Returns the path written.
+    """
+    p = pathlib.Path(path)
+    if p.suffix.lower() not in {".tif", ".tiff"}:
+        p = p.with_suffix(".tiff")
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+    metadata = {"wavelengths": wavelengths.astype(np.float64).tolist()}
+    tifffile.imwrite(str(p), cube, metadata=metadata)
+    return p
+
+
+def write_jp2(
+    cube: np.ndarray,
+    wavelengths: np.ndarray,
+    path: str | pathlib.Path,
+) -> pathlib.Path:
+    """Write an HSI cube to JPEG 2000.
+
+    Wavelength metadata is stored via rasterio band tags (key
+    ``"wavelength"`` on band 1).  Because JP2 is a lossy format,
+    round-trip fidelity is not exact.  Returns the path written.
+    """
+    p = pathlib.Path(path)
+    if p.suffix.lower() != ".jp2":
+        p = p.with_suffix(".jp2")
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+    from rasterio.crs import CRS
+    from rasterio.transform import from_bounds
+
+    h, w, c = cube.shape
+    cube_uint16 = np.clip(cube * 65535.0, 0, 65535).astype(np.uint16)
+    transform = from_bounds(0, 0, w, h, w, h)
+    with rasterio.open(
+        str(p),
+        "w",
+        driver="JP2OpenJPEG",
+        height=h,
+        width=w,
+        count=c,
+        dtype="uint16",
+        crs=CRS.from_epsg(4326),
+        transform=transform,
+    ) as dst:
+        for band_idx in range(c):
+            dst.write(cube_uint16[:, :, band_idx], band_idx + 1)
+        wl_json = json.dumps(wavelengths.tolist())
+        dst.update_tags(1, wavelength=wl_json)
+
+    return p
+
+
+def write_hsd(
+    cube: np.ndarray,
+    wavelengths: np.ndarray,
+    path: str | pathlib.Path,
+) -> pathlib.Path:
+    """Write an HSI cube to HSICityV2-compatible HSD format.
+
+    The cube is written as raw float32 data following a 7-int32 header.
+    Wavelength endpoints (startw, endw) are stored in the header.
+    Since no PCA compression is applied, the ``d`` header field is set
+    to 0 as a sentinel and the full ``height * width * sr`` float32
+    values are written after the header.  Returns the path written.
+
+    Note: this simplified variant is not compatible with the
+    PCA-compressed HSICityV2 format.  It can be round-tripped through
+    ``read_hsd`` within this library, but other HSICityV2 readers will
+    not understand it.
+    """
+    p = pathlib.Path(path)
+    if p.suffix.lower() != ".hsd":
+        p = p.with_suffix(".hsd")
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+    h, w, c = cube.shape
+    startw = float(wavelengths[0])
+    endw = float(wavelengths[-1])
+
+    header = np.array([h, w, c, 0, round(startw), 0, round(endw)], dtype=np.int32)
+
+    stepw = np.array([(endw - startw) / max(c - 1, 1)], dtype=np.float32)
+    average = np.zeros(c, dtype=np.float32)
+
+    with p.open("wb") as f:
+        header.tofile(f)
+        stepw.tofile(f)
+        average.tofile(f)
+        cube.reshape(-1).astype(np.float32).tofile(f)
+
+    return p
+
+
+def write_png_folder(
+    cube: np.ndarray,
+    wavelengths: np.ndarray,
+    folder: str | pathlib.Path,
+    line_cam: bool = True,
+) -> pathlib.Path:
+    """Write an HSI cube as a folder of indexed PNG files.
+
+    Each PNG represents one scan line (``line_cam=True``) or one
+    spectral channel (``line_cam=False``).  File names are zero-padded
+    integers: ``00000.png``, ``00001.png``, ...
+
+    Values outside ``[0, 1]`` are clipped before conversion to uint16.
+    Because PNG does not store wavelength metadata, callers must
+    persist wavelengths separately.  Returns the folder path.
+    """
+    p = pathlib.Path(folder)
+    p.mkdir(parents=True, exist_ok=True)
+
+    if line_cam:
+        for i in range(cube.shape[1]):
+            line = cube[:, i, :]
+            line_uint16 = np.clip(line * 65535.0, 0, 65535).astype(np.uint16)
+            img = Image.fromarray(line_uint16)
+            img.save(p / f"{i:05d}.png")
+    else:
+        for i in range(cube.shape[2]):
+            channel = cube[:, :, i]
+            channel_uint16 = np.clip(channel * 65535.0, 0, 65535).astype(np.uint16)
+            img = Image.fromarray(channel_uint16)
+            img.save(p / f"{i:05d}.png")
+
+    return p
+
+
+def write_auto(
+    cube: np.ndarray,
+    wavelengths: np.ndarray,
+    path: str | pathlib.Path,
+) -> pathlib.Path:
+    """Dispatch to the appropriate writer based on file extension or path type.
+
+    Supported extensions: ``.hdr`` (ENVI), ``.tif``/``.tiff``, ``.jp2``,
+    ``.hsd``.  If *path* is a directory, ``write_png_folder`` is used.
+    """
+    p = pathlib.Path(path)
+
+    if p.is_dir() or (not p.suffix):
+        return write_png_folder(cube, wavelengths, p)
+
+    ext = p.suffix.lower()
+
+    if ext == ".hdr":
+        return write_envi(cube, wavelengths, p)
+    if ext in {".tif", ".tiff"}:
+        return write_tiff(cube, wavelengths, p)
+    if ext == ".jp2":
+        return write_jp2(cube, wavelengths, p)
+    if ext == ".hsd":
+        return write_hsd(cube, wavelengths, p)
+
+    raise ValueError(
+        f"Unsupported file extension for writing: {ext}. "
+        "Supported: .hdr (ENVI), .tif/.tiff, .jp2, .hsd, or a directory (PNG folder)"
+    )
