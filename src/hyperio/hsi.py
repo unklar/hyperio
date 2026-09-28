@@ -263,21 +263,22 @@ class HSI:
         idx = int(np.argmin(np.abs(self.wavelengths - np.float32(wavelength))))
         return idx
 
-    def nearest_band(self, wavelength: float, window: int = 0) -> np.ndarray:
+    def nearest_band(self, wavelength: float, window: int = 0, window_agg: str = "mean") -> np.ndarray:
         idx = self.nearest_band_index(wavelength)
-        return average_window(self._cube, idx, window)
+        return average_window(self._cube, idx, window, agg=window_agg)
 
-    def bands_from_wavelengths(self, wavelengths: list[float], window: int = 0) -> np.ndarray:
-        bands = [self.nearest_band(wl, window=window) for wl in wavelengths]
+    def bands_from_wavelengths(self, wavelengths: list[float], window: int = 0, window_agg: str = "mean") -> np.ndarray:
+        bands = [self.nearest_band(wl, window=window, window_agg=window_agg) for wl in wavelengths]
         return np.stack(bands, axis=2).astype(np.float32)
 
     def compute_index(self, formula: Callable[..., Any], **kwargs: Any) -> np.ndarray:
         window = int(kwargs.pop("window", 0))
+        window_agg = kwargs.pop("window_agg", "mean")
 
         formula_args: dict[str, Any] = {}
         for key, value in kwargs.items():
             if isinstance(value, (int, float, np.floating)):
-                formula_args[key] = self.nearest_band(float(value), window=window)
+                formula_args[key] = self.nearest_band(float(value), window=window, window_agg=window_agg)
             else:
                 formula_args[key] = value
 
@@ -290,10 +291,11 @@ class HSI:
         wl_green: float = 550.0,
         wl_blue: float = 475.0,
         window: int = 0,
+        window_agg: str = "mean",
         q_low: float = 1.0,
         q_high: float = 99.0,
     ) -> np.ndarray:
-        rgb_cube = self.bands_from_wavelengths([wl_red, wl_green, wl_blue], window=window)
+        rgb_cube = self.bands_from_wavelengths([wl_red, wl_green, wl_blue], window=window, window_agg=window_agg)
         return percentile_stretch(rgb_cube, q_low=q_low, q_high=q_high)
 
     def rescale(self, factor: float) -> "HSI":

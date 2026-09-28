@@ -138,8 +138,18 @@ def try_parse_wavelengths_from_xml_like_text(text: str) -> np.ndarray | None:
     return vals
 
 
-def average_window(cube: np.ndarray, band_idx: int, window: int) -> np.ndarray:
-    """Return a 2D band or averaged neighborhood around band index."""
+def average_window(cube: np.ndarray, band_idx: int, window: int, agg: str = "mean") -> np.ndarray:
+    """Return a 2D band or aggregated neighborhood around band index.
+
+    *agg* controls how the window is aggregated:
+        ``mean``   — arithmetic mean (default)
+        ``median`` — median
+        ``sum``    — sum of bands in the window
+    """
+    valid_agg = ("mean", "median", "sum")
+    if agg not in valid_agg:
+        raise ValueError(f"agg must be one of {valid_agg}, got '{agg}'")
+
     if window < 0:
         raise ValueError("window must be >= 0")
 
@@ -148,7 +158,12 @@ def average_window(cube: np.ndarray, band_idx: int, window: int) -> np.ndarray:
 
     lo = max(0, band_idx - window)
     hi = min(cube.shape[2], band_idx + window + 1)
-    return cube[:, :, lo:hi].mean(axis=2, dtype=np.float32).astype(np.float32)
+    region = cube[:, :, lo:hi]
+    if agg == "mean":
+        return region.mean(axis=2, dtype=np.float32).astype(np.float32)
+    if agg == "median":
+        return np.median(region, axis=2).astype(np.float32)
+    return region.sum(axis=2, dtype=np.float32).astype(np.float32)
 
 
 def upper_convex_hull_points(spectrum: np.ndarray, wavelengths: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

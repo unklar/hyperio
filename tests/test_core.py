@@ -50,6 +50,51 @@ def test_nearest_band_and_window_average() -> None:
     np.testing.assert_allclose(avg, np.full((2, 2), 2.0, dtype=np.float32))
 
 
+def test_window_agg_median_and_sum() -> None:
+    cube = np.zeros((2, 2, 5), dtype=np.float32)
+    for i in range(5):
+        cube[:, :, i] = i
+
+    wavelengths = np.array([500, 550, 600, 650, 700], dtype=np.float32)
+    hsi = HSI(cube, wavelengths)
+
+    median_result = hsi.nearest_band(602.0, window=1, window_agg="median")
+    sum_result = hsi.nearest_band(602.0, window=1, window_agg="sum")
+
+    np.testing.assert_allclose(median_result, np.full((2, 2), 2.0, dtype=np.float32))
+    np.testing.assert_allclose(sum_result, np.full((2, 2), 6.0, dtype=np.float32))
+
+
+def test_window_agg_invalid_raises() -> None:
+    cube = np.zeros((2, 2, 5), dtype=np.float32)
+    wavelengths = np.array([500, 550, 600, 650, 700], dtype=np.float32)
+    hsi = HSI(cube, wavelengths)
+
+    try:
+        hsi.nearest_band(600.0, window=1, window_agg="invalid")
+        assert False, "Expected ValueError for invalid window_agg"
+    except ValueError as exc:
+        assert "agg" in str(exc)
+
+
+def test_compute_index_with_window_agg() -> None:
+    cube = np.zeros((3, 3, 5), dtype=np.float32)
+    for i in range(5):
+        cube[:, :, i] = float(i)
+
+    wavelengths = np.array([500, 550, 600, 650, 700], dtype=np.float32)
+    hsi = HSI(cube, wavelengths)
+
+    result_sum = hsi.compute_index(
+        lambda nir, red: nir - red,
+        nir=600.0, red=500.0, window=1, window_agg="sum",
+    )
+    nir_sum = 1.0 + 2.0 + 3.0
+    red_sum = 0.0 + 1.0
+    expected = nir_sum - red_sum
+    np.testing.assert_allclose(result_sum, np.full((3, 3), expected, dtype=np.float32))
+
+
 def test_rgb_output_shape_and_range() -> None:
     rng = np.random.default_rng(42)
     cube = rng.random((20, 10, 6), dtype=np.float32)
