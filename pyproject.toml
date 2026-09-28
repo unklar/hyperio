@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hyperio"
-version = "0.3.0"
+version = "0.4.0"
 description = "Hyperspectral image I/O and processing with a NumPy-like HSI class"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -44,10 +44,9 @@ docs = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/hybrint/hyperio"
-Documentation = "https://hyperio.readthedocs.io"
-Repository = "https://github.com/hybrint/hyperio"
-Issues = "https://github.com/hybrint/hyperio/issues"
+Homepage = "https://github.com/unklar/hyperio"
+Repository = "https://github.com/unklar/hyperio"
+Issues = "https://github.com/unklar/hyperio/issues"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

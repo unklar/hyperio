@@ -4,8 +4,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 import tifffile
 from PIL import Image
+
+# These tests compare against the predecessor library use_hsi_io, which is not
+# published; skip the whole module when it is unavailable so the public test
+# suite runs without it.
+pytest.importorskip("use_hsi_io", reason="use_hsi_io is not installed")
 
 from use_hsi_io import HSI as OldHSI
 from use_hsi_io.io import (

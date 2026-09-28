@@ -1,6 +1,22 @@
 Changelog
 =========
 
+v0.4.0 (2026)
+--------------
+
+New features:
+
+- ``window_agg`` parameter (``"mean"``, ``"median"``, ``"sum"``) for
+  spectral band windows — ``HSI.nearest_band``, ``HSI.bands_from_wavelengths``,
+  ``HSI.compute_index``, and ``HSI.rgb`` now forward the aggregation mode to
+  ``_utils.average_window``.  Default ``"mean"`` preserves previous behavior.
+  See ``docs/superpowers/specs/2026-06-05-window-agg-design.md``.
+
+Other:
+
+- ``tests/test_equivalence.py`` is skipped when the internal predecessor
+  package ``use_hsi_io`` is not installed.
+
 v0.3.0 (2025)
 --------------
 
