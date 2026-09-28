@@ -196,13 +196,11 @@ Each reader returns a `ReadResult(cube, wavelengths, reference_spectrum, referen
 
 ## Documentation
 
-Full API documentation is available at [hyperio.readthedocs.io](https://hyperio.readthedocs.io).
-
-To build the docs locally:
+The Sphinx docs sources live in the `docs/` folder. To build them locally:
 
 ```bash
 pip install hyperio[docs]
-cd docs && make html
+cd docs && sphinx-build -b html . _build/html
 ```
 
 ## License
