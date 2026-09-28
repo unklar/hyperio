@@ -45,6 +45,7 @@ class HSI:
         self._reference_spectrum: np.ndarray | None = None
         self._reference_multiplier: float = 1.0
         self._reference_eps: float = 1e-8
+        self._dark_reference: np.ndarray | None = None
 
     @property
     def shape(self) -> tuple[int, int, int]:
@@ -94,10 +95,16 @@ class HSI:
     def reference_eps(self) -> float:
         return self._reference_eps
 
+    @property
+    def dark_reference(self) -> np.ndarray | None:
+        return self._dark_reference
+
     def copy(self) -> "HSI":
         new = HSI(self._cube.copy(), self.wavelengths.copy())
         if self._reference_spectrum is not None:
             new._reference_spectrum = self._reference_spectrum.copy()
+        if self._dark_reference is not None:
+            new._dark_reference = self._dark_reference.copy()
         new._reference_multiplier = self._reference_multiplier
         new._reference_eps = self._reference_eps
         return new
@@ -131,6 +138,8 @@ class HSI:
         new_hsi = HSI(new_cube, new_wl)
         if self._reference_spectrum is not None:
             new_hsi._reference_spectrum = self._reference_spectrum[mask]
+        if self._dark_reference is not None:
+            new_hsi._dark_reference = self._dark_reference[mask]
         new_hsi._reference_multiplier = self._reference_multiplier
         new_hsi._reference_eps = self._reference_eps
         return new_hsi
@@ -200,6 +209,7 @@ class HSI:
         line_cam: bool = True,
         normalize: bool = True,
         metadata_json: bool = False,
+        dark_reference: np.ndarray | list[float] | None = None,
     ) -> "HSI":
         result = read_auto(
             path,
@@ -209,11 +219,13 @@ class HSI:
             line_cam=line_cam,
             normalize=normalize,
             metadata_json=metadata_json,
+            dark_reference=dark_reference,
         )
         hsi = cls(result.cube, result.wavelengths)
         hsi._reference_spectrum = result.reference_spectrum
         hsi._reference_multiplier = result.reference_multiplier
         hsi._reference_eps = result.reference_eps
+        hsi._dark_reference = result.dark_reference
         return hsi
 
     def write(self, path: str | Path, **kwargs: Any) -> Path:
@@ -244,6 +256,9 @@ class HSI:
             ref_kw["reference_spectrum"] = self._reference_spectrum
             ref_kw["reference_multiplier"] = self._reference_multiplier
             ref_kw["reference_eps"] = self._reference_eps
+        dark = kwargs.get("dark_reference", self._dark_reference)
+        if dark is not None:
+            ref_kw["dark_reference"] = dark
 
         if p.is_dir() or (not p.suffix):
             line_cam = kwargs.get("line_cam", True)
@@ -322,6 +337,8 @@ class HSI:
         new_hsi = HSI(new_cube, self.wavelengths.copy())
         if self._reference_spectrum is not None:
             new_hsi._reference_spectrum = self._reference_spectrum.copy()
+        if self._dark_reference is not None:
+            new_hsi._dark_reference = self._dark_reference.copy()
         new_hsi._reference_multiplier = self._reference_multiplier
         new_hsi._reference_eps = self._reference_eps
         return new_hsi
@@ -424,6 +441,8 @@ class HSI:
         new_hsi = HSI(removed, wavelengths.copy())
         if self._reference_spectrum is not None:
             new_hsi._reference_spectrum = self._reference_spectrum.copy()
+        if self._dark_reference is not None:
+            new_hsi._dark_reference = self._dark_reference.copy()
         new_hsi._reference_multiplier = self._reference_multiplier
         new_hsi._reference_eps = self._reference_eps
         return new_hsi
@@ -465,6 +484,8 @@ class HSI:
         new_hsi = HSI(normalized, self.wavelengths.copy())
         if self._reference_spectrum is not None:
             new_hsi._reference_spectrum = self._reference_spectrum.copy()
+        if self._dark_reference is not None:
+            new_hsi._dark_reference = self._dark_reference.copy()
         new_hsi._reference_multiplier = self._reference_multiplier
         new_hsi._reference_eps = self._reference_eps
         return new_hsi

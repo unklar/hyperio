@@ -34,6 +34,7 @@ class ReadResult:
     reference_spectrum: np.ndarray | None = None
     reference_multiplier: float = 1.0
     reference_eps: float = 1e-8
+    dark_reference: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ class Jp2Metadata:
     reference_spectrum: np.ndarray | None
     reference_multiplier: float
     reference_eps: float
+    dark_reference: np.ndarray | None = None
 
 
 def _sidecar_json_path(image_path: pathlib.Path) -> pathlib.Path:
@@ -62,6 +64,7 @@ def _write_sidecar_json(
     reference_spectrum: np.ndarray | None = None,
     reference_multiplier: float = 1.0,
     reference_eps: float = 1e-8,
+    dark_reference: np.ndarray | None = None,
 ) -> pathlib.Path:
     """Write a JSON sidecar file with full HSI metadata."""
     meta: dict[str, Any] = {
@@ -69,6 +72,8 @@ def _write_sidecar_json(
     }
     if reference_spectrum is not None:
         meta["reference_spectrum"] = reference_spectrum.astype(np.float64).tolist()
+    if dark_reference is not None:
+        meta["dark_reference"] = dark_reference.astype(np.float64).tolist()
     if reference_multiplier != 1.0:
         meta["reference_multiplier"] = reference_multiplier
     if reference_eps != 1e-8:
@@ -190,19 +195,53 @@ def _normalize_cube_with_reference(
     reference_spectrum: np.ndarray,
     reference_multiplier: float = 1.0,
     reference_eps: float = 1e-8,
+    dark_reference: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Normalize cube by reference spectrum band-wise."""
+    """Flat-field normalize cube by white and (optionally) dark reference spectra.
+
+    Without a dark reference this is a white-reference normalization,
+    ``cube / (reference * multiplier)``.  With a dark reference it is the
+    standard flat-field correction
+        (cube - dark) / (reference * multiplier - dark)
+    which removes the sensor dark/baseline offset before dividing by the
+    white reference.
+
+    Args:
+        cube: Raw (H, W, C) cube in the same units as the references.
+        reference_spectrum: White-reference spectrum, shape (C,).
+        reference_multiplier: Scale factor applied to the white reference.
+        reference_eps: Floor for the (safe) denominator.
+        dark_reference: Optional dark-reference spectrum, shape (C,), in the
+            same units as ``cube``.
+
+    Returns:
+        (H, W, C) float32 cube of flat-field corrected values.
+    """
     ref = np.asarray(reference_spectrum, dtype=np.float32).reshape(-1)
     if ref.size != cube.shape[2]:
         raise ValueError(
             f"reference_spectrum size ({ref.size}) does not match channels ({cube.shape[2]})"
         )
 
+    dark: np.ndarray | None = None
+    if dark_reference is not None:
+        dark = np.asarray(dark_reference, dtype=np.float32).reshape(-1)
+        if dark.size != cube.shape[2]:
+            raise ValueError(
+                f"dark_reference size ({dark.size}) does not match channels ({cube.shape[2]})"
+            )
+
     eps = float(reference_eps) if float(reference_eps) > 0.0 else 1e-8
     mult = float(reference_multiplier) if float(reference_multiplier) > 0.0 else 1.0
     denom = ref * np.float32(mult)
+    if dark is not None:
+        denom = denom - dark
     safe = np.where(np.abs(denom) >= eps, denom, np.where(denom < 0.0, -eps, eps)).astype(np.float32)
-    return (cube / safe[None, None, :]).astype(np.float32)
+
+    numer = cube
+    if dark is not None:
+        numer = cube - dark[None, None, :]
+    return (numer / safe[None, None, :]).astype(np.float32)
 
 
 def _parse_payload_dict(text: str) -> dict[str, Any] | None:
@@ -285,6 +324,7 @@ def extract_jp2_metadata(path: str | pathlib.Path) -> Jp2Metadata:
     reference_spectrum: np.ndarray | None = None
     reference_multiplier: float = 1.0
     reference_eps: float = 1e-8
+    dark_reference: np.ndarray | None = None
 
     while off + 8 <= len(data):
         lbox = _read_u32_be(data, off)
@@ -326,6 +366,11 @@ def extract_jp2_metadata(path: str | pathlib.Path) -> Jp2Metadata:
                             reference_eps = float(payload_dict["reference_eps"])
                         except Exception:
                             pass
+                    if dark_reference is None and "dark_reference" in payload_dict:
+                        try:
+                            dark_reference = np.asarray(payload_dict["dark_reference"], dtype=np.float32)
+                        except Exception:
+                            pass
 
                 from_text = try_parse_wavelengths_from_xml_like_text(as_text)
                 if from_text is not None:
@@ -365,6 +410,7 @@ def extract_jp2_metadata(path: str | pathlib.Path) -> Jp2Metadata:
         reference_spectrum=reference_spectrum,
         reference_multiplier=reference_multiplier,
         reference_eps=reference_eps,
+        dark_reference=dark_reference,
     )
 
 
@@ -374,10 +420,12 @@ def read_envi(
     min_wavelength: float | None = None,
     max_wavelength: float | None = None,
     metadata_json: bool = False,
+    dark_reference: np.ndarray | list[float] | None = None,
 ) -> ReadResult:
     p = pathlib.Path(path)
     sidecar_wavelengths: np.ndarray | None = None
     sidecar_ref: np.ndarray | None = None
+    sidecar_dark: np.ndarray | None = None
     sidecar_mult: float = 1.0
     sidecar_eps: float = 1e-8
     if metadata_json:
@@ -387,6 +435,8 @@ def read_envi(
                 sidecar_wavelengths = np.asarray(sc["wavelengths"], dtype=np.float32)
             if "reference_spectrum" in sc:
                 sidecar_ref = np.asarray(sc["reference_spectrum"], dtype=np.float32)
+            if "dark_reference" in sc:
+                sidecar_dark = np.asarray(sc["dark_reference"], dtype=np.float32)
             if "reference_multiplier" in sc:
                 sidecar_mult = float(sc["reference_multiplier"])
             if "reference_eps" in sc:
@@ -411,12 +461,14 @@ def read_envi(
         extracted_wavelengths=extracted,
         format_name="ENVI",
     )
+    dark = sidecar_dark if dark_reference is None else np.asarray(dark_reference, dtype=np.float32)
     return ReadResult(
         cube=cube,
         wavelengths=wl,
         reference_spectrum=sidecar_ref,
         reference_multiplier=sidecar_mult,
         reference_eps=sidecar_eps,
+        dark_reference=dark,
     )
 
 
@@ -426,10 +478,12 @@ def read_tiff(
     min_wavelength: float | None = None,
     max_wavelength: float | None = None,
     metadata_json: bool = False,
+    dark_reference: np.ndarray | list[float] | None = None,
 ) -> ReadResult:
     p = pathlib.Path(path)
     sidecar_wavelengths: np.ndarray | None = None
     sidecar_ref: np.ndarray | None = None
+    sidecar_dark: np.ndarray | None = None
     sidecar_mult: float = 1.0
     sidecar_eps: float = 1e-8
     if metadata_json:
@@ -439,6 +493,8 @@ def read_tiff(
                 sidecar_wavelengths = np.asarray(sc["wavelengths"], dtype=np.float32)
             if "reference_spectrum" in sc:
                 sidecar_ref = np.asarray(sc["reference_spectrum"], dtype=np.float32)
+            if "dark_reference" in sc:
+                sidecar_dark = np.asarray(sc["dark_reference"], dtype=np.float32)
             if "reference_multiplier" in sc:
                 sidecar_mult = float(sc["reference_multiplier"])
             if "reference_eps" in sc:
@@ -513,12 +569,14 @@ def read_tiff(
         extracted_wavelengths=extracted,
         format_name="TIFF",
     )
+    dark = sidecar_dark if dark_reference is None else np.asarray(dark_reference, dtype=np.float32)
     return ReadResult(
         cube=cube,
         wavelengths=wl,
         reference_spectrum=sidecar_ref,
         reference_multiplier=sidecar_mult,
         reference_eps=sidecar_eps,
+        dark_reference=dark,
     )
 
 
@@ -529,10 +587,12 @@ def read_jp2(
     max_wavelength: float | None = None,
     normalize: bool = True,
     metadata_json: bool = False,
+    dark_reference: np.ndarray | list[float] | None = None,
 ) -> ReadResult:
     p = pathlib.Path(path)
     sidecar_wavelengths: np.ndarray | None = None
     sidecar_ref: np.ndarray | None = None
+    sidecar_dark: np.ndarray | None = None
     sidecar_mult: float = 1.0
     sidecar_eps: float = 1e-8
     if metadata_json:
@@ -542,6 +602,8 @@ def read_jp2(
                 sidecar_wavelengths = np.asarray(sc["wavelengths"], dtype=np.float32)
             if "reference_spectrum" in sc:
                 sidecar_ref = np.asarray(sc["reference_spectrum"], dtype=np.float32)
+            if "dark_reference" in sc:
+                sidecar_dark = np.asarray(sc["dark_reference"], dtype=np.float32)
             if "reference_multiplier" in sc:
                 sidecar_mult = float(sc["reference_multiplier"])
             if "reference_eps" in sc:
@@ -574,6 +636,17 @@ def read_jp2(
     if extracted is not None:
         extracted = _align_wavelength_count(extracted, int(cube.shape[2]))
 
+    # Dark reference precedence: explicit argument > JSON sidecar > embedded JP2 metadata.
+    dark: np.ndarray | None
+    if dark_reference is not None:
+        dark = np.asarray(dark_reference, dtype=np.float32)
+    elif sidecar_dark is not None:
+        dark = sidecar_dark
+    else:
+        dark = md.dark_reference
+    if dark is not None:
+        dark = _align_wavelength_count(dark, int(cube.shape[2]))
+
     if normalize and md.reference_spectrum is not None and sidecar_ref is None:
         ref = _align_wavelength_count(md.reference_spectrum, int(cube.shape[2]))
         if ref.size != cube.shape[2]:
@@ -586,6 +659,7 @@ def read_jp2(
             reference_spectrum=ref,
             reference_multiplier=md.reference_multiplier,
             reference_eps=md.reference_eps,
+            dark_reference=dark,
         )
     elif normalize and sidecar_ref is not None:
         ref = _align_wavelength_count(sidecar_ref, int(cube.shape[2]))
@@ -595,6 +669,7 @@ def read_jp2(
             reference_spectrum=ref,
             reference_multiplier=sidecar_mult,
             reference_eps=sidecar_eps,
+            dark_reference=dark,
         )
 
     wl = _resolve_wavelengths(
@@ -611,6 +686,7 @@ def read_jp2(
         reference_spectrum=sidecar_ref if sidecar_ref is not None else md.reference_spectrum,
         reference_multiplier=sidecar_mult if sidecar_ref is not None else md.reference_multiplier,
         reference_eps=sidecar_eps if sidecar_ref is not None else md.reference_eps,
+        dark_reference=dark,
     )
 
 
@@ -620,6 +696,7 @@ def read_hsd(
     min_wavelength: float | None = None,
     max_wavelength: float | None = None,
     metadata_json: bool = False,
+    dark_reference: np.ndarray | list[float] | None = None,
 ) -> ReadResult:
     """Read HSICityV2 HSD files and reconstruct the hyperspectral cube.
 
@@ -630,6 +707,7 @@ def read_hsd(
     p = pathlib.Path(path)
     sidecar_wavelengths: np.ndarray | None = None
     sidecar_ref: np.ndarray | None = None
+    sidecar_dark: np.ndarray | None = None
     sidecar_mult: float = 1.0
     sidecar_eps: float = 1e-8
     if metadata_json:
@@ -639,6 +717,8 @@ def read_hsd(
                 sidecar_wavelengths = np.asarray(sc["wavelengths"], dtype=np.float32)
             if "reference_spectrum" in sc:
                 sidecar_ref = np.asarray(sc["reference_spectrum"], dtype=np.float32)
+            if "dark_reference" in sc:
+                sidecar_dark = np.asarray(sc["dark_reference"], dtype=np.float32)
             if "reference_multiplier" in sc:
                 sidecar_mult = float(sc["reference_multiplier"])
             if "reference_eps" in sc:
@@ -714,12 +794,14 @@ def read_hsd(
         format_name="HSD",
     )
 
+    dark = sidecar_dark if dark_reference is None else np.asarray(dark_reference, dtype=np.float32)
     return ReadResult(
         cube=cube,
         wavelengths=wl,
         reference_spectrum=sidecar_ref,
         reference_multiplier=sidecar_mult,
         reference_eps=sidecar_eps,
+        dark_reference=dark,
     )
 
 
@@ -730,6 +812,7 @@ def read_line_scan_png_folder(
     max_wavelength: float | None = None,
     line_cam: bool = True,
     metadata_json: bool = False,
+    dark_reference: np.ndarray | list[float] | None = None,
 ) -> ReadResult:
     """Read a folder of PNG files into a hyperspectral cube.
 
@@ -746,6 +829,7 @@ def read_line_scan_png_folder(
 
     sidecar_wavelengths: np.ndarray | None = None
     sidecar_ref: np.ndarray | None = None
+    sidecar_dark: np.ndarray | None = None
     sidecar_mult: float = 1.0
     sidecar_eps: float = 1e-8
     if metadata_json:
@@ -755,6 +839,8 @@ def read_line_scan_png_folder(
                 sidecar_wavelengths = np.asarray(sc["wavelengths"], dtype=np.float32)
             if "reference_spectrum" in sc:
                 sidecar_ref = np.asarray(sc["reference_spectrum"], dtype=np.float32)
+            if "dark_reference" in sc:
+                sidecar_dark = np.asarray(sc["dark_reference"], dtype=np.float32)
             if "reference_multiplier" in sc:
                 sidecar_mult = float(sc["reference_multiplier"])
             if "reference_eps" in sc:
@@ -856,12 +942,14 @@ def read_line_scan_png_folder(
         extracted_wavelengths=extracted_wl,
         format_name="Line-scan PNG folder",
     )
+    dark = sidecar_dark if dark_reference is None else np.asarray(dark_reference, dtype=np.float32)
     return ReadResult(
         cube=cube,
         wavelengths=wl,
         reference_spectrum=sidecar_ref,
         reference_multiplier=sidecar_mult,
         reference_eps=sidecar_eps,
+        dark_reference=dark,
     )
 
 
@@ -873,6 +961,7 @@ def read_auto(
     line_cam: bool = True,
     normalize: bool = True,
     metadata_json: bool = False,
+    dark_reference: np.ndarray | list[float] | None = None,
 ) -> ReadResult:
     p = pathlib.Path(path)
     if p.is_dir():
@@ -883,6 +972,7 @@ def read_auto(
             max_wavelength=max_wavelength,
             line_cam=line_cam,
             metadata_json=metadata_json,
+            dark_reference=dark_reference,
         )
 
     ext = p.suffix.lower()
@@ -894,6 +984,7 @@ def read_auto(
             min_wavelength=min_wavelength,
             max_wavelength=max_wavelength,
             metadata_json=metadata_json,
+            dark_reference=dark_reference,
         )
     if ext in {".tif", ".tiff"}:
         return read_tiff(
@@ -902,6 +993,7 @@ def read_auto(
             min_wavelength=min_wavelength,
             max_wavelength=max_wavelength,
             metadata_json=metadata_json,
+            dark_reference=dark_reference,
         )
     if ext == ".jp2":
         return read_jp2(
@@ -911,6 +1003,7 @@ def read_auto(
             max_wavelength=max_wavelength,
             normalize=normalize,
             metadata_json=metadata_json,
+            dark_reference=dark_reference,
         )
     if ext == ".hsd":
         return read_hsd(
@@ -919,6 +1012,7 @@ def read_auto(
             min_wavelength=min_wavelength,
             max_wavelength=max_wavelength,
             metadata_json=metadata_json,
+            dark_reference=dark_reference,
         )
 
     raise ValueError(f"Unsupported file extension: {ext}")
@@ -932,6 +1026,7 @@ def write_envi(
     reference_spectrum: np.ndarray | None = None,
     reference_multiplier: float = 1.0,
     reference_eps: float = 1e-8,
+    dark_reference: np.ndarray | None = None,
 ) -> pathlib.Path:
     """Write an HSI cube to ENVI format (raw binary + .hdr header).
 
@@ -965,6 +1060,7 @@ def write_envi(
             reference_spectrum=reference_spectrum,
             reference_multiplier=reference_multiplier,
             reference_eps=reference_eps,
+            dark_reference=dark_reference,
         )
 
     return hdr_path
@@ -978,6 +1074,7 @@ def write_tiff(
     reference_spectrum: np.ndarray | None = None,
     reference_multiplier: float = 1.0,
     reference_eps: float = 1e-8,
+    dark_reference: np.ndarray | None = None,
 ) -> pathlib.Path:
     """Write an HSI cube to TIFF with wavelength metadata embedded.
 
@@ -999,6 +1096,7 @@ def write_tiff(
             reference_spectrum=reference_spectrum,
             reference_multiplier=reference_multiplier,
             reference_eps=reference_eps,
+            dark_reference=dark_reference,
         )
 
     return p
@@ -1012,6 +1110,7 @@ def write_jp2(
     reference_spectrum: np.ndarray | None = None,
     reference_multiplier: float = 1.0,
     reference_eps: float = 1e-8,
+    dark_reference: np.ndarray | None = None,
 ) -> pathlib.Path:
     """Write an HSI cube to JPEG 2000.
 
@@ -1058,6 +1157,7 @@ def write_jp2(
             reference_spectrum=reference_spectrum,
             reference_multiplier=reference_multiplier,
             reference_eps=reference_eps,
+            dark_reference=dark_reference,
         )
 
     return p
@@ -1071,6 +1171,7 @@ def write_hsd(
     reference_spectrum: np.ndarray | None = None,
     reference_multiplier: float = 1.0,
     reference_eps: float = 1e-8,
+    dark_reference: np.ndarray | None = None,
 ) -> pathlib.Path:
     """Write an HSI cube to HSICityV2-compatible HSD format.
 
@@ -1112,6 +1213,7 @@ def write_hsd(
             reference_spectrum=reference_spectrum,
             reference_multiplier=reference_multiplier,
             reference_eps=reference_eps,
+            dark_reference=dark_reference,
         )
 
     return p
@@ -1126,6 +1228,7 @@ def write_png_folder(
     reference_spectrum: np.ndarray | None = None,
     reference_multiplier: float = 1.0,
     reference_eps: float = 1e-8,
+    dark_reference: np.ndarray | None = None,
 ) -> pathlib.Path:
     """Write an HSI cube as a folder of indexed PNG files.
 
@@ -1172,6 +1275,7 @@ def write_png_folder(
             reference_spectrum=reference_spectrum,
             reference_multiplier=reference_multiplier,
             reference_eps=reference_eps,
+            dark_reference=dark_reference,
         )
 
     return p
@@ -1185,6 +1289,7 @@ def write_auto(
     reference_spectrum: np.ndarray | None = None,
     reference_multiplier: float = 1.0,
     reference_eps: float = 1e-8,
+    dark_reference: np.ndarray | None = None,
     line_cam: bool = True,
 ) -> pathlib.Path:
     """Dispatch to the appropriate writer based on file extension or path type.
@@ -1202,6 +1307,7 @@ def write_auto(
             reference_spectrum=reference_spectrum,
             reference_multiplier=reference_multiplier,
             reference_eps=reference_eps,
+            dark_reference=dark_reference,
         )
 
     ext = p.suffix.lower()
@@ -1211,6 +1317,7 @@ def write_auto(
         reference_spectrum=reference_spectrum,
         reference_multiplier=reference_multiplier,
         reference_eps=reference_eps,
+        dark_reference=dark_reference,
     )
 
     if ext == ".hdr":

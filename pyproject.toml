@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hyperio"
-version = "0.4.0"
+version = "0.5.0"
 description = "Hyperspectral image I/O and processing with a NumPy-like HSI class"
 readme = "README.md"
 requires-python = ">=3.10"

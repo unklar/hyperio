@@ -1,6 +1,24 @@
 Changelog
 =========
 
+v0.5.0 (2026)
+--------------
+
+New features:
+
+- **Dark reference / flat-field correction** — an optional dark-reference
+  spectrum can now be supplied to the readers (``HSI.read(..., dark_reference=)``)
+  and stored per image.  When present, normalization uses the standard
+  flat-field formula ``R = (cube - dark) / (reference*multiplier - dark)``
+  instead of ``R = cube / (reference*multiplier)``.  The dark reference is
+  preserved in JSON sidecars (``metadata_json=True``) and embedded JP2
+  metadata, so it is applied automatically on load when available.
+- ``ReadResult``, ``Jp2Metadata`` and ``HSI`` now expose ``dark_reference``.
+
+Other:
+
+- Added ``tests/test_dark_reference.py``.
+
 v0.4.0 (2026)
 --------------
 
